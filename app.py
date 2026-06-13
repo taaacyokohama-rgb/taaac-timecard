@@ -1,0 +1,897 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+TAAAC 出退勤管理システム
+"""
+
+import os
+import json
+import uuid
+import io
+import base64
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+
+from flask import Flask, request, jsonify, render_template_string, redirect, url_for, session
+
+try:
+    import qrcode
+    import gspread
+    from google.oauth2 import service_account
+except ImportError as e:
+    print(f"パッケージ不足: {e}")
+    print("pip3 install flask 'qrcode[pil]' gspread google-auth")
+    exit(1)
+
+app = Flask(__name__)
+app.secret_key = "taaac-timecard-secret-2026"
+
+JST = timezone(timedelta(hours=9))
+SPREADSHEET_ID = "1zLlshmq5AK1SoSG0Ezc1KhQbarI6g5_0H3lOwSYJOJU"
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+SERVICE_ACCOUNT_FILE = Path(__file__).parent / "service_account.json"
+STAFF_FILE = Path(__file__).parent / "staff.json"
+ADMIN_PASSWORD = "taaac2026"
+
+# ========== スタッフデータ管理 ==========
+
+def load_staff():
+    if STAFF_FILE.exists():
+        return json.loads(STAFF_FILE.read_text(encoding="utf-8"))
+    return {}
+
+def save_staff(data):
+    STAFF_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+# ========== Google Sheets ==========
+
+def get_sheets_client():
+    # 環境変数からサービスアカウントJSON取得（Render用）
+    sa_json = os.environ.get("SERVICE_ACCOUNT_JSON")
+    if sa_json:
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            f.write(sa_json)
+            tmp_path = f.name
+        creds = service_account.Credentials.from_service_account_file(tmp_path, scopes=SCOPES)
+        os.unlink(tmp_path)
+    elif SERVICE_ACCOUNT_FILE.exists():
+        creds = service_account.Credentials.from_service_account_file(
+            str(SERVICE_ACCOUNT_FILE), scopes=SCOPES
+        )
+    else:
+        return None
+    return gspread.authorize(creds)
+
+WEEKDAYS_JP = ["月", "火", "水", "木", "金", "土", "日"]
+
+# 列定義: A=名前, B=時給, C=日付, D=曜日, E=出勤, F=退勤, G=合計時間(h), H=給与, I=交通費, J=合計
+HEADER_ROW = ["名前", "時給", "日付", "曜日", "出勤時間", "退勤時間", "合計時間(h)", "給与(円)", "交通費(円)", "合計(円)"]
+
+def get_or_create_staff_sheet(gc, staff_name):
+    wb = gc.open_by_key(SPREADSHEET_ID)
+    try:
+        ws = wb.worksheet(staff_name)
+    except gspread.WorksheetNotFound:
+        ws = wb.add_worksheet(title=staff_name, rows=1000, cols=12)
+        ws.update([HEADER_ROW], "A1")
+        ws.format("A1:J1", {
+            "textFormat": {"bold": True, "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
+            "backgroundColor": {"red": 0.2, "green": 0.2, "blue": 0.2},
+            "horizontalAlignment": "CENTER"
+        })
+    return ws, wb
+
+def find_next_row(ws):
+    all_vals = ws.col_values(3)
+    return len(all_vals) + 1
+
+def add_monthly_summary_if_needed(ws, year, month, staff_name, hourly_wage):
+    date_col = ws.col_values(3)
+    month_prefix = f"{year:04d}-{month:02d}"
+    rows_in_month = [i+1 for i, v in enumerate(date_col) if v.startswith(month_prefix)]
+    if not rows_in_month:
+        return
+    last_row = max(rows_in_month)
+    first_row = min(rows_in_month)
+    next_after_last = last_row + 1
+    vals_after = ws.row_values(next_after_last) if next_after_last <= len(date_col)+1 else []
+    summary_label = f"{month}月 合計"
+    sf_hours = f"=SUM(G{first_row}:G{last_row})"
+    sf_pay   = f"=SUM(H{first_row}:H{last_row})"
+    sf_trans = f"=SUM(I{first_row}:I{last_row})"
+    sf_total = f"=SUM(J{first_row}:J{last_row})"
+
+    row_data = [[staff_name, hourly_wage, summary_label, "", "", "", sf_hours, sf_pay, sf_trans, sf_total]]
+    if vals_after and len(vals_after) > 2 and vals_after[2] == summary_label:
+        ws.update(row_data, f"A{next_after_last}", value_input_option="USER_ENTERED")
+    else:
+        ws.append_row(row_data[0], value_input_option="USER_ENTERED")
+        summary_row = find_next_row(ws) - 1
+        ws.format(f"A{summary_row}:J{summary_row}", {
+            "textFormat": {"bold": True},
+            "backgroundColor": {"red": 0.85, "green": 0.93, "blue": 1.0}
+        })
+
+def record_to_sheet(staff_name, clock_in_dt, clock_out_dt, hourly_wage, transport):
+    gc = get_sheets_client()
+    if not gc:
+        return False, "Google Sheets未認証"
+
+    ws, wb = get_or_create_staff_sheet(gc, staff_name)
+
+    hours = (clock_out_dt - clock_in_dt).total_seconds() / 3600
+    pay = round(hours * hourly_wage)
+    total = pay + transport
+    weekday = WEEKDAYS_JP[clock_in_dt.weekday()]
+    date_str = clock_in_dt.strftime("%Y-%m-%d")
+
+    date_col = ws.col_values(3)
+    existing_row = None
+    for i, v in enumerate(date_col):
+        if v == date_str:
+            existing_row = i + 1
+            break
+
+    row_data = [staff_name, hourly_wage, date_str, weekday,
+                clock_in_dt.strftime("%H:%M"), clock_out_dt.strftime("%H:%M"),
+                round(hours, 2), pay, transport, total]
+
+    if existing_row:
+        ws.update([row_data], f"A{existing_row}")
+    else:
+        all_dates = ws.col_values(3)
+        if all_dates and "月 合計" in all_dates[-1]:
+            ws.insert_row(row_data, len(all_dates))
+        else:
+            ws.append_row(row_data)
+
+    add_monthly_summary_if_needed(ws, clock_in_dt.year, clock_in_dt.month, staff_name, hourly_wage)
+    return True, None
+
+def get_monthly_records(staff_name, year, month):
+    """スタッフの月別勤務データをスプシから取得"""
+    gc = get_sheets_client()
+    if not gc:
+        return None, "Google Sheets未認証"
+    try:
+        wb = gc.open_by_key(SPREADSHEET_ID)
+        ws = wb.worksheet(staff_name)
+    except Exception as e:
+        return None, str(e)
+
+    month_prefix = f"{year:04d}-{month:02d}"
+    all_rows = ws.get_all_values()
+    records = []
+    for row in all_rows[1:]:  # ヘッダースキップ
+        if len(row) >= 3 and row[2].startswith(month_prefix):
+            records.append(row)
+    return records, None
+
+# ========== セッション管理 ==========
+active_sessions = {}  # staff_id -> {"clock_in": datetime}
+
+# ========== HTML テンプレート ==========
+
+PUNCH_HTML = """
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>打刻 - {{ name }}</title>
+<link rel="apple-touch-icon" href="/static/logo.png">
+<link rel="icon" href="/static/favicon.ico">
+<meta name="apple-mobile-web-app-title" content="TAAAC打刻">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, sans-serif; background: #f5f5f5; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+  .card { background: white; border-radius: 20px; padding: 40px 32px; max-width: 360px; width: 90%; text-align: center; box-shadow: 0 4px 24px rgba(0,0,0,0.1); }
+  .avatar { width: 80px; height: 80px; border-radius: 50%; background: #e8f4fd; display: flex; align-items: center; justify-content: center; font-size: 32px; margin: 0 auto 16px; }
+  h1 { font-size: 22px; color: #222; margin-bottom: 4px; }
+  .time { font-size: 36px; font-weight: bold; color: #333; margin: 20px 0; }
+  .date { color: #888; font-size: 14px; margin-bottom: 24px; }
+  .status { font-size: 14px; padding: 6px 16px; border-radius: 20px; display: inline-block; margin-bottom: 24px; }
+  .status.in { background: #e8f7ee; color: #27ae60; }
+  .status.out { background: #fef9e7; color: #f39c12; }
+  .btn { width: 100%; padding: 18px; border: none; border-radius: 14px; font-size: 18px; font-weight: bold; cursor: pointer; transition: 0.15s; }
+  .btn-in { background: #27ae60; color: white; }
+  .btn-out { background: #e74c3c; color: white; }
+  .btn:active { transform: scale(0.97); }
+  .msg { margin-top: 20px; padding: 14px; border-radius: 10px; font-size: 15px; }
+  .msg.success { background: #e8f7ee; color: #27ae60; }
+  .msg.error { background: #fdecea; color: #e74c3c; }
+  .mypage-link { display: block; margin-top: 18px; color: #3498db; font-size: 14px; text-decoration: none; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="avatar">👤</div>
+  <h1>{{ name }} さん</h1>
+  <div class="time" id="clock">--:--:--</div>
+  <div class="date" id="date"></div>
+  {% if is_clocked_in %}
+  <div class="status in">● 出勤中（{{ clock_in_time }}〜）</div>
+  {% else %}
+  <div class="status out">○ 未出勤</div>
+  {% endif %}
+  {% if message %}
+  <div class="msg {{ msg_type }}">{{ message }}</div>
+  {% else %}
+  <form method="post">
+    {% if is_clocked_in %}
+    <button class="btn btn-out" type="submit" name="action" value="out">退勤する</button>
+    {% else %}
+    <button class="btn btn-in" type="submit" name="action" value="in">出勤する</button>
+    {% endif %}
+  </form>
+  {% endif %}
+  <a class="mypage-link" href="/mypage/{{ staff_id }}">📊 今月の実績を見る</a>
+</div>
+<script>
+function updateClock() {
+  const now = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  document.getElementById('clock').textContent =
+    pad(now.getHours()) + ':' + pad(now.getMinutes()) + ':' + pad(now.getSeconds());
+  const days = ['日','月','火','水','木','金','土'];
+  document.getElementById('date').textContent =
+    now.getFullYear() + '年' + (now.getMonth()+1) + '月' + now.getDate() + '日（' + days[now.getDay()] + '）';
+}
+setInterval(updateClock, 1000);
+updateClock();
+{% if message %}
+setTimeout(() => { window.location.href = window.location.pathname; }, 3000);
+{% endif %}
+</script>
+</body>
+</html>
+"""
+
+MYPAGE_HTML = """
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{ name }}さんの実績</title>
+<link rel="apple-touch-icon" href="/static/logo.png">
+<link rel="icon" href="/static/favicon.ico">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, sans-serif; background: #f5f5f5; min-height: 100vh; }
+  header { background: #1a1a2e; color: white; padding: 16px 20px; display: flex; justify-content: space-between; align-items: center; }
+  header h1 { font-size: 17px; }
+  .back { color: #aaa; font-size: 13px; text-decoration: none; }
+  .container { max-width: 600px; margin: 0 auto; padding: 20px 16px; }
+  .summary-cards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 20px; }
+  .summary-card { background: white; border-radius: 14px; padding: 18px; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+  .summary-card .label { font-size: 12px; color: #888; margin-bottom: 6px; }
+  .summary-card .value { font-size: 22px; font-weight: bold; color: #222; }
+  .summary-card.highlight { background: #1a1a2e; }
+  .summary-card.highlight .label { color: #aaa; }
+  .summary-card.highlight .value { color: white; }
+  .section { background: white; border-radius: 14px; padding: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+  h2 { font-size: 15px; color: #333; margin-bottom: 14px; border-bottom: 2px solid #f0f0f0; padding-bottom: 8px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { background: #1a1a2e; color: white; padding: 8px 6px; text-align: center; font-weight: normal; }
+  td { padding: 9px 6px; text-align: center; border-bottom: 1px solid #f5f5f5; }
+  tr:last-child td { border-bottom: none; }
+  .sat { color: #3498db; }
+  .sun { color: #e74c3c; }
+  .month-nav { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+  .month-nav a { color: #3498db; text-decoration: none; font-size: 14px; padding: 6px 14px; border: 1px solid #3498db; border-radius: 8px; }
+  .month-title { font-size: 16px; font-weight: bold; color: #333; }
+  .error { background: #fdecea; color: #e74c3c; padding: 14px; border-radius: 10px; text-align: center; font-size: 14px; }
+  .empty { color: #aaa; text-align: center; padding: 30px; font-size: 14px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>{{ name }}さんの実績</h1>
+  <a href="/punch/{{ staff_id }}" class="back">← 打刻に戻る</a>
+</header>
+<div class="container">
+
+  <div class="month-nav">
+    <a href="/mypage/{{ staff_id }}?year={{ prev_year }}&month={{ prev_month }}">← 前月</a>
+    <span class="month-title">{{ year }}年{{ month }}月</span>
+    <a href="/mypage/{{ staff_id }}?year={{ next_year }}&month={{ next_month }}">次月 →</a>
+  </div>
+
+  {% if error %}
+  <div class="error">{{ error }}</div>
+  {% elif not records %}
+  <div class="empty">この月の記録はありません</div>
+  {% else %}
+
+  <div class="summary-cards">
+    <div class="summary-card">
+      <div class="label">出勤日数</div>
+      <div class="value">{{ work_days }}日</div>
+    </div>
+    <div class="summary-card">
+      <div class="label">合計時間</div>
+      <div class="value">{{ "%.1f"|format(total_hours) }}h</div>
+    </div>
+    <div class="summary-card">
+      <div class="label">給与合計</div>
+      <div class="value">¥{{ "{:,}".format(total_pay) }}</div>
+    </div>
+    <div class="summary-card highlight">
+      <div class="label">交通費込み合計</div>
+      <div class="value">¥{{ "{:,}".format(total_all) }}</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>勤務記録</h2>
+    <table>
+      <tr>
+        <th>日付</th><th>曜日</th><th>出勤</th><th>退勤</th><th>時間</th><th>給与</th>{% if has_transport %}<th>交通費</th>{% endif %}
+      </tr>
+      {% for r in records %}
+      <tr>
+        <td>{{ r.date[5:] }}</td>
+        <td class="{{ 'sat' if r.weekday == '土' else ('sun' if r.weekday == '日' else '') }}">{{ r.weekday }}</td>
+        <td>{{ r.clock_in }}</td>
+        <td>{{ r.clock_out }}</td>
+        <td>{{ r.hours }}h</td>
+        <td>¥{{ "{:,}".format(r.pay) }}</td>
+        {% if has_transport %}<td>¥{{ "{:,}".format(r.transport) }}</td>{% endif %}
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+  {% endif %}
+
+</div>
+</body>
+</html>
+"""
+
+ADMIN_LOGIN_HTML = """
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>管理者ログイン</title>
+<link rel="icon" href="/static/favicon.ico">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, sans-serif; background: #1a1a2e; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+  .card { background: white; border-radius: 16px; padding: 40px 32px; max-width: 360px; width: 90%; text-align: center; }
+  h1 { font-size: 20px; margin-bottom: 24px; color: #333; }
+  input { width: 100%; padding: 14px; border: 2px solid #ddd; border-radius: 10px; font-size: 16px; margin-bottom: 16px; outline: none; }
+  input:focus { border-color: #3498db; }
+  .btn { width: 100%; padding: 14px; background: #3498db; color: white; border: none; border-radius: 10px; font-size: 16px; font-weight: bold; cursor: pointer; }
+  .error { color: #e74c3c; font-size: 14px; margin-bottom: 12px; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>管理者ログイン</h1>
+  {% if error %}<div class="error">{{ error }}</div>{% endif %}
+  <form method="post">
+    <input type="password" name="password" placeholder="パスワード" autofocus>
+    <button class="btn" type="submit">ログイン</button>
+  </form>
+</div>
+</body>
+</html>
+"""
+
+ADMIN_HTML = """
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>出退勤管理 - TAAAC</title>
+<link rel="icon" href="/static/favicon.ico">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, sans-serif; background: #f5f5f5; }
+  header { background: #1a1a2e; color: white; padding: 16px 24px; display: flex; justify-content: space-between; align-items: center; }
+  header h1 { font-size: 18px; }
+  .logout { color: #aaa; font-size: 13px; text-decoration: none; }
+  .container { max-width: 900px; margin: 0 auto; padding: 24px 16px; }
+  .section { background: white; border-radius: 14px; padding: 24px; margin-bottom: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+  h2 { font-size: 16px; color: #333; margin-bottom: 18px; border-bottom: 2px solid #f0f0f0; padding-bottom: 10px; }
+  .staff-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
+  .staff-card { border: 2px solid #f0f0f0; border-radius: 12px; padding: 16px; position: relative; }
+  .staff-card.active { border-color: #27ae60; background: #f0faf4; }
+  .staff-name { font-weight: bold; font-size: 15px; margin-bottom: 4px; }
+  .staff-wage { color: #888; font-size: 13px; }
+  .staff-transport { color: #8e44ad; font-size: 12px; margin-top: 2px; }
+  .staff-status { font-size: 12px; margin-top: 8px; }
+  .status-in { color: #27ae60; }
+  .status-out { color: #aaa; }
+  .qr-btn { display: block; margin-top: 8px; padding: 6px 12px; background: #3498db; color: white; border: none; border-radius: 6px; font-size: 12px; cursor: pointer; text-decoration: none; text-align: center; }
+  .edit-btn { display: block; margin-top: 6px; padding: 6px 12px; background: #f39c12; color: white; border: none; border-radius: 6px; font-size: 12px; cursor: pointer; text-align: center; width: 100%; }
+  .add-form { display: flex; gap: 10px; flex-wrap: wrap; }
+  .add-form input, .add-form select { flex: 1; min-width: 100px; padding: 10px 14px; border: 2px solid #ddd; border-radius: 8px; font-size: 14px; outline: none; }
+  .add-form input:focus { border-color: #3498db; }
+  .add-form button { padding: 10px 20px; background: #27ae60; color: white; border: none; border-radius: 8px; font-size: 14px; font-weight: bold; cursor: pointer; white-space: nowrap; }
+  .delete-btn { position: absolute; top: 8px; right: 8px; background: none; border: none; color: #ddd; cursor: pointer; font-size: 16px; }
+  .delete-btn:hover { color: #e74c3c; }
+  .modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 100; align-items: center; justify-content: center; }
+  .modal.open { display: flex; }
+  .modal-inner { background: white; border-radius: 16px; padding: 32px; text-align: center; max-width: 340px; width: 90%; }
+  .modal-inner img { max-width: 240px; margin: 16px auto; display: block; }
+  .modal-inner h3 { margin-bottom: 8px; }
+  .modal-inner p { color: #888; font-size: 13px; margin-bottom: 16px; word-break: break-all; }
+  .close-btn { padding: 10px 24px; background: #333; color: white; border: none; border-radius: 8px; cursor: pointer; }
+  .edit-modal-inner { background: white; border-radius: 16px; padding: 28px; max-width: 340px; width: 90%; }
+  .edit-modal-inner h3 { margin-bottom: 18px; font-size: 16px; }
+  .edit-modal-inner input { width: 100%; padding: 10px 14px; border: 2px solid #ddd; border-radius: 8px; font-size: 14px; outline: none; margin-bottom: 12px; }
+  .edit-modal-inner input:focus { border-color: #3498db; }
+  .edit-modal-inner label { display: block; font-size: 12px; color: #888; margin-bottom: 4px; }
+  .edit-save-btn { width: 100%; padding: 12px; background: #27ae60; color: white; border: none; border-radius: 8px; font-size: 15px; font-weight: bold; cursor: pointer; margin-top: 4px; }
+  .edit-cancel-btn { width: 100%; padding: 10px; background: #f5f5f5; color: #888; border: none; border-radius: 8px; font-size: 14px; cursor: pointer; margin-top: 8px; }
+  .alert { padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; font-size: 14px; }
+  .alert-success { background: #e8f7ee; color: #27ae60; }
+  .alert-error { background: #fdecea; color: #e74c3c; }
+</style>
+</head>
+<body>
+<header>
+  <h1>TAAAC 出退勤管理</h1>
+  <div style="display:flex;gap:8px;">
+    <a href="https://docs.google.com/spreadsheets/d/1zLlshmq5AK1SoSG0Ezc1KhQbarI6g5_0H3lOwSYJOJU/edit" class="logout">管理画面</a>
+    <a href="/admin/logout" class="logout">ログアウト</a>
+  </div>
+</header>
+<div class="container">
+
+  {% if flash_msg %}
+  <div class="alert alert-{{ flash_type }}">{{ flash_msg }}</div>
+  {% endif %}
+
+  <!-- スタッフ一覧 -->
+  <div class="section">
+    <h2>スタッフ一覧</h2>
+    {% if not staff %}
+    <p style="color:#aaa;font-size:14px;">スタッフがまだ登録されていません</p>
+    {% else %}
+    <div class="staff-grid">
+      {% for sid, s in staff.items() %}
+      <div class="staff-card {{ 'active' if sid in active else '' }}">
+        <button class="delete-btn" onclick="deleteStaff('{{ sid }}', '{{ s.name }}')">✕</button>
+        <div class="staff-name">{{ s.name }}</div>
+        <div class="staff-wage">時給 ¥{{ s.wage | int | format_number }}</div>
+        {% if s.transport %}
+        <div class="staff-transport">交通費 ¥{{ s.transport | int | format_number }}/日</div>
+        {% endif %}
+        <div class="staff-status">
+          {% if sid in active %}
+          <span class="status-in">● 出勤中（{{ active[sid] }}〜）</span>
+          {% else %}
+          <span class="status-out">○ 未出勤</span>
+          {% endif %}
+        </div>
+        <a class="qr-btn" href="#" onclick="showQR('{{ sid }}', '{{ s.name }}')">QRコード表示</a>
+        <button class="edit-btn" onclick="showEdit('{{ sid }}', '{{ s.name }}', {{ s.wage }}, {{ s.transport or 0 }})">編集</button>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- 手動打刻追加 -->
+  <div class="section">
+    <h2>手動で打刻を追加</h2>
+    <form method="post" action="/admin/manual_punch">
+      <div class="add-form">
+        <select name="staff_id" required style="flex:2;padding:10px 14px;border:2px solid #ddd;border-radius:8px;font-size:14px;outline:none;">
+          <option value="">スタッフを選択</option>
+          {% for sid, s in staff.items() %}
+          <option value="{{ sid }}">{{ s.name }}</option>
+          {% endfor %}
+        </select>
+        <input type="date" name="date" required style="flex:1.5">
+        <input type="time" name="clock_in" placeholder="出勤" required style="flex:1">
+        <input type="time" name="clock_out" placeholder="退勤" required style="flex:1">
+        <button type="submit" style="background:#8e44ad;">追加</button>
+      </div>
+    </form>
+  </div>
+
+  <!-- 外部URL設定 -->
+  <div class="section">
+    <h2>外部URL設定（ngrok用）</h2>
+    <form method="post" action="/admin/set_base_url">
+      <div class="add-form">
+        <input type="text" name="base_url" placeholder="https://xxxx.ngrok-free.app" value="{{ base_url }}" style="flex:3">
+        <button type="submit">保存</button>
+      </div>
+    </form>
+    <p style="font-size:12px;color:#aaa;margin-top:8px;">QRコードのURLに使われます。ngrokのURLを貼り付けてください。</p>
+  </div>
+
+  <!-- スタッフ追加 -->
+  <div class="section">
+    <h2>スタッフ追加</h2>
+    <form method="post" action="/admin/add_staff">
+      <div class="add-form">
+        <input type="text" name="name" placeholder="名前" required>
+        <input type="number" name="wage" placeholder="時給（円）" min="900" required>
+        <input type="number" name="transport" placeholder="交通費/日（円）" min="0" value="0">
+        <button type="submit">追加</button>
+      </div>
+    </form>
+  </div>
+
+</div>
+
+<!-- QRモーダル -->
+<div class="modal" id="qrModal">
+  <div class="modal-inner">
+    <h3 id="qrName"></h3>
+    <p id="qrUrl"></p>
+    <img id="qrImg" src="" alt="QR">
+    <br>
+    <button class="close-btn" onclick="closeQR()">閉じる</button>
+  </div>
+</div>
+
+<!-- 編集モーダル -->
+<div class="modal" id="editModal">
+  <div class="edit-modal-inner">
+    <h3>✏️ スタッフ編集</h3>
+    <form method="post" action="/admin/edit_staff">
+      <input type="hidden" name="staff_id" id="editStaffId">
+      <label>名前</label>
+      <input type="text" id="editName" name="name" required>
+      <label>時給（円）</label>
+      <input type="number" id="editWage" name="wage" min="900" required>
+      <label>交通費/日（円）</label>
+      <input type="number" id="editTransport" name="transport" min="0" value="0">
+      <button type="submit" class="edit-save-btn">保存</button>
+    </form>
+    <button class="edit-cancel-btn" onclick="closeEdit()">キャンセル</button>
+  </div>
+</div>
+
+<script>
+const BASE_URL = "{{ base_url }}";
+function showQR(sid, name) {
+  document.getElementById('qrName').textContent = name + ' さん';
+  const url = BASE_URL + '/punch/' + sid + '?skip=1';
+  document.getElementById('qrUrl').textContent = url;
+  document.getElementById('qrImg').src = '/admin/qr/' + sid + '?base_url=' + encodeURIComponent(BASE_URL);
+  document.getElementById('qrModal').classList.add('open');
+}
+function closeQR() { document.getElementById('qrModal').classList.remove('open'); }
+function showEdit(sid, name, wage, transport) {
+  document.getElementById('editStaffId').value = sid;
+  document.getElementById('editName').value = name;
+  document.getElementById('editWage').value = wage;
+  document.getElementById('editTransport').value = transport;
+  document.getElementById('editModal').classList.add('open');
+}
+function closeEdit() { document.getElementById('editModal').classList.remove('open'); }
+function deleteStaff(sid, name) {
+  if (confirm(name + ' さんを削除しますか？')) {
+    fetch('/admin/delete_staff/' + sid, {method: 'POST'}).then(() => location.reload());
+  }
+}
+</script>
+</body>
+</html>
+"""
+
+# ========== Jinja フィルター ==========
+
+@app.template_filter('format_number')
+def format_number(value):
+    return f"{int(value):,}"
+
+# ========== ルート ==========
+
+@app.after_request
+def add_ngrok_header(response):
+    response.headers["ngrok-skip-browser-warning"] = "true"
+    return response
+
+@app.route("/punch/<staff_id>", methods=["GET", "POST"])
+def punch(staff_id):
+    staff = load_staff()
+    if staff_id not in staff:
+        return "スタッフが見つかりません", 404
+
+    s = staff[staff_id]
+    now = datetime.now(JST)
+    is_clocked_in = staff_id in active_sessions
+    clock_in_time = active_sessions[staff_id]["clock_in"].strftime("%H:%M") if is_clocked_in else None
+
+    message = None
+    msg_type = None
+
+    if request.method == "POST":
+        action = request.form.get("action")
+        if action == "in" and not is_clocked_in:
+            active_sessions[staff_id] = {"clock_in": now}
+            message = f"出勤しました ✓ {now.strftime('%H:%M')}"
+            msg_type = "success"
+            is_clocked_in = True
+            clock_in_time = now.strftime("%H:%M")
+        elif action == "out" and is_clocked_in:
+            clock_in_dt = active_sessions.pop(staff_id)["clock_in"]
+            transport = s.get("transport", 0)
+            ok, err = record_to_sheet(s["name"], clock_in_dt, now, s["wage"], transport)
+            if ok:
+                hours = (now - clock_in_dt).total_seconds() / 3600
+                pay = round(hours * s["wage"])
+                total = pay + transport
+                message = f"退勤しました ✓ {now.strftime('%H:%M')}｜{hours:.1f}h｜¥{total:,}"
+                msg_type = "success"
+            else:
+                message = f"退勤記録 ✓ {now.strftime('%H:%M')}（スプシ未接続: {err}）"
+                msg_type = "success"
+            is_clocked_in = False
+
+    return render_template_string(
+        PUNCH_HTML,
+        staff_id=staff_id,
+        name=s["name"],
+        is_clocked_in=is_clocked_in,
+        clock_in_time=clock_in_time,
+        message=message,
+        msg_type=msg_type
+    )
+
+@app.route("/mypage/<staff_id>")
+def mypage(staff_id):
+    staff = load_staff()
+    if staff_id not in staff:
+        return "スタッフが見つかりません", 404
+
+    s = staff[staff_id]
+    now = datetime.now(JST)
+
+    year = int(request.args.get("year", now.year))
+    month = int(request.args.get("month", now.month))
+
+    # 前月・次月計算
+    if month == 1:
+        prev_year, prev_month = year - 1, 12
+    else:
+        prev_year, prev_month = year, month - 1
+    if month == 12:
+        next_year, next_month = year + 1, 1
+    else:
+        next_year, next_month = year, month + 1
+
+    records_raw, error = get_monthly_records(s["name"], year, month)
+
+    records = []
+    total_hours = 0
+    total_pay = 0
+    total_transport = 0
+
+    if records_raw:
+        for row in records_raw:
+            # row: [名前, 時給, 日付, 曜日, 出勤, 退勤, 合計h, 給与, 交通費, 合計]
+            try:
+                hours = float(row[6]) if len(row) > 6 and row[6] else 0
+                pay = int(row[7]) if len(row) > 7 and row[7] else 0
+                transport = int(row[8]) if len(row) > 8 and row[8] else 0
+                records.append({
+                    "date": row[2],
+                    "weekday": row[3] if len(row) > 3 else "",
+                    "clock_in": row[4] if len(row) > 4 else "",
+                    "clock_out": row[5] if len(row) > 5 else "",
+                    "hours": hours,
+                    "pay": pay,
+                    "transport": transport,
+                })
+                total_hours += hours
+                total_pay += pay
+                total_transport += transport
+            except Exception:
+                pass
+
+    has_transport = any(r["transport"] > 0 for r in records)
+    total_all = total_pay + total_transport
+
+    return render_template_string(
+        MYPAGE_HTML,
+        staff_id=staff_id,
+        name=s["name"],
+        year=year,
+        month=month,
+        prev_year=prev_year,
+        prev_month=prev_month,
+        next_year=next_year,
+        next_month=next_month,
+        records=records,
+        work_days=len(records),
+        total_hours=total_hours,
+        total_pay=total_pay,
+        total_transport=total_transport,
+        total_all=total_all,
+        has_transport=has_transport,
+        error=error
+    )
+
+@app.route("/admin/login", methods=["GET", "POST"])
+def admin_login():
+    error = None
+    if request.method == "POST":
+        if request.form.get("password") == ADMIN_PASSWORD:
+            session["admin"] = True
+            return redirect(url_for("admin"))
+        error = "パスワードが違います"
+    return render_template_string(ADMIN_LOGIN_HTML, error=error)
+
+@app.route("/admin/logout")
+def admin_logout():
+    session.pop("admin", None)
+    return redirect(url_for("admin_login"))
+
+@app.route("/admin")
+def admin():
+    if not session.get("admin"):
+        return redirect(url_for("admin_login"))
+
+    staff = load_staff()
+    active = {sid: v["clock_in"].strftime("%H:%M") for sid, v in active_sessions.items()}
+    host = request.host
+    base_url = session.get("base_url") or f"http://{host}"
+    flash_msg = session.pop("flash_msg", None)
+    flash_type = session.pop("flash_type", "success")
+
+    return render_template_string(
+        ADMIN_HTML,
+        staff=staff,
+        active=active,
+        base_url=base_url,
+        flash_msg=flash_msg,
+        flash_type=flash_type
+    )
+
+@app.route("/admin/add_staff", methods=["POST"])
+def add_staff():
+    if not session.get("admin"):
+        return redirect(url_for("admin_login"))
+
+    name = request.form.get("name", "").strip()
+    wage = request.form.get("wage", "0")
+    transport = request.form.get("transport", "0")
+
+    if not name:
+        session["flash_msg"] = "名前を入力してください"
+        session["flash_type"] = "error"
+        return redirect(url_for("admin"))
+
+    staff = load_staff()
+    staff_id = str(uuid.uuid4())[:8]
+    staff[staff_id] = {"name": name, "wage": int(wage), "transport": int(transport)}
+    save_staff(staff)
+
+    gc = get_sheets_client()
+    if gc:
+        get_or_create_staff_sheet(gc, name)
+
+    session["flash_msg"] = f"{name} さんを追加しました（時給¥{int(wage):,} / 交通費¥{int(transport):,}/日）"
+    session["flash_type"] = "success"
+    return redirect(url_for("admin"))
+
+@app.route("/admin/edit_staff", methods=["POST"])
+def edit_staff():
+    if not session.get("admin"):
+        return redirect(url_for("admin_login"))
+
+    staff_id = request.form.get("staff_id")
+    name = request.form.get("name", "").strip()
+    wage = int(request.form.get("wage", "0"))
+    transport = int(request.form.get("transport", "0"))
+
+    staff = load_staff()
+    if staff_id not in staff:
+        session["flash_msg"] = "スタッフが見つかりません"
+        session["flash_type"] = "error"
+        return redirect(url_for("admin"))
+
+    staff[staff_id]["name"] = name
+    staff[staff_id]["wage"] = wage
+    staff[staff_id]["transport"] = transport
+    save_staff(staff)
+
+    session["flash_msg"] = f"{name} さんの情報を更新しました"
+    session["flash_type"] = "success"
+    return redirect(url_for("admin"))
+
+@app.route("/admin/delete_staff/<staff_id>", methods=["POST"])
+def delete_staff(staff_id):
+    if not session.get("admin"):
+        return jsonify({"error": "unauthorized"}), 401
+
+    staff = load_staff()
+    if staff_id in staff:
+        del staff[staff_id]
+        save_staff(staff)
+        active_sessions.pop(staff_id, None)
+    return jsonify({"ok": True})
+
+@app.route("/admin/manual_punch", methods=["POST"])
+def manual_punch():
+    if not session.get("admin"):
+        return redirect(url_for("admin_login"))
+
+    staff = load_staff()
+    staff_id = request.form.get("staff_id")
+    date_str = request.form.get("date")
+    clock_in_str = request.form.get("clock_in")
+    clock_out_str = request.form.get("clock_out")
+
+    if not all([staff_id, date_str, clock_in_str, clock_out_str]) or staff_id not in staff:
+        session["flash_msg"] = "入力内容を確認してください"
+        session["flash_type"] = "error"
+        return redirect(url_for("admin"))
+
+    s = staff[staff_id]
+    clock_in_dt = datetime.strptime(f"{date_str} {clock_in_str}", "%Y-%m-%d %H:%M").replace(tzinfo=JST)
+    clock_out_dt = datetime.strptime(f"{date_str} {clock_out_str}", "%Y-%m-%d %H:%M").replace(tzinfo=JST)
+
+    if clock_out_dt <= clock_in_dt:
+        session["flash_msg"] = "退勤時刻は出勤時刻より後にしてください"
+        session["flash_type"] = "error"
+        return redirect(url_for("admin"))
+
+    transport = s.get("transport", 0)
+    ok, err = record_to_sheet(s["name"], clock_in_dt, clock_out_dt, s["wage"], transport)
+    hours = (clock_out_dt - clock_in_dt).total_seconds() / 3600
+    pay = round(hours * s["wage"])
+    total = pay + transport
+
+    if ok:
+        session["flash_msg"] = f"{s['name']} {date_str} {clock_in_str}〜{clock_out_str}（{hours:.1f}h / ¥{total:,}）を記録しました"
+        session["flash_type"] = "success"
+    else:
+        session["flash_msg"] = f"スプシへの記録に失敗しました: {err}"
+        session["flash_type"] = "error"
+
+    return redirect(url_for("admin"))
+
+@app.route("/admin/set_base_url", methods=["POST"])
+def set_base_url():
+    if not session.get("admin"):
+        return redirect(url_for("admin_login"))
+    base_url = request.form.get("base_url", "").strip().rstrip("/")
+    session["base_url"] = base_url
+    session["flash_msg"] = "外部URLを設定しました"
+    session["flash_type"] = "success"
+    return redirect(url_for("admin"))
+
+@app.route("/admin/qr/<staff_id>")
+def qr_image(staff_id):
+    if not session.get("admin"):
+        return redirect(url_for("admin_login"))
+
+    base_url = request.args.get("base_url") or session.get("base_url") or f"http://{request.host}"
+    url = f"{base_url}/punch/{staff_id}?skip=1"
+
+    img = qrcode.make(url)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+
+    from flask import send_file
+    return send_file(buf, mimetype="image/png")
+
+@app.route("/")
+def index():
+    return redirect(url_for("admin"))
+
+if __name__ == "__main__":
+    print("=" * 50)
+    print("TAAAC 出退勤管理システム起動")
+    print(f"管理画面: http://localhost:5001/admin")
+    print(f"パスワード: {ADMIN_PASSWORD}")
+    print("=" * 50)
+    app.run(host="0.0.0.0", port=5001, debug=False)

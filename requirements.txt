@@ -1,0 +1,6 @@
+flask
+gspread
+google-auth-oauthlib
+google-auth-httplib2
+qrcode[pil]
+gunicorn

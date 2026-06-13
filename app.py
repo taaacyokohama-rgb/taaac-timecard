@@ -741,7 +741,7 @@ def admin():
     staff = load_staff()
     active = {sid: v["clock_in"].strftime("%H:%M") for sid, v in active_sessions.items()}
     host = request.host
-    base_url = session.get("base_url") or f"http://{host}"
+    base_url = session.get("base_url") or os.environ.get("BASE_URL") or f"https://{host}"
     flash_msg = session.pop("flash_msg", None)
     flash_type = session.pop("flash_type", "success")
 
@@ -873,7 +873,7 @@ def qr_image(staff_id):
     if not session.get("admin"):
         return redirect(url_for("admin_login"))
 
-    base_url = request.args.get("base_url") or session.get("base_url") or f"http://{request.host}"
+    base_url = request.args.get("base_url") or session.get("base_url") or os.environ.get("BASE_URL") or f"https://{request.host}"
     url = f"{base_url}/punch/{staff_id}?skip=1"
 
     img = qrcode.make(url)

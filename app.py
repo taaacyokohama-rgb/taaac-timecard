@@ -65,29 +65,38 @@ def get_sheets_client():
 
 WEEKDAYS_JP = ["月", "火", "水", "木", "金", "土", "日"]
 
-# 列定義: A=名前, B=時給, C=日付, D=曜日, E=シフト開始, F=シフト終了, G=出勤, H=退勤, I=合計時間(h), J=給与, K=交通費, L=合計
-HEADER_ROW = ["名前", "時給", "日付", "曜日", "シフト開始", "シフト終了", "出勤時間", "退勤時間", "合計時間(h)", "給与(円)", "交通費(円)", "合計(円)"]
+# 列定義: A=日付, B=曜日, C=シフト開始, D=シフト終了, E=出勤, F=退勤, G=合計時間(h), H=給与, I=交通費, J=合計
+# 行1: スタッフ名情報, 行2: 時給情報, 行3: ヘッダー, 行4以降: データ
+HEADER_ROW = ["日付", "曜日", "シフト開始", "シフト終了", "出勤時間", "退勤時間", "合計時間(h)", "給与(円)", "交通費(円)", "合計(円)"]
+DATA_START_ROW = 4  # 1-indexed
 
-def get_or_create_staff_sheet(gc, staff_name):
+def get_or_create_staff_sheet(gc, staff_name, hourly_wage=None):
     wb = gc.open_by_key(SPREADSHEET_ID)
     try:
         ws = wb.worksheet(staff_name)
     except gspread.WorksheetNotFound:
-        ws = wb.add_worksheet(title=staff_name, rows=1000, cols=12)
-        ws.update([HEADER_ROW], "A1")
-        ws.format("A1:J1", {
+        ws = wb.add_worksheet(title=staff_name, rows=1000, cols=10)
+        ws.update([["スタッフ名", staff_name]], "A1")
+        ws.update([["時給", hourly_wage or ""]], "A2")
+        ws.update([HEADER_ROW], "A3")
+        ws.format("A1:B2", {"textFormat": {"bold": True}})
+        ws.format("A3:J3", {
             "textFormat": {"bold": True, "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
             "backgroundColor": {"red": 0.2, "green": 0.2, "blue": 0.2},
             "horizontalAlignment": "CENTER"
         })
+    else:
+        # 時給が変わっている場合に備えて更新
+        if hourly_wage is not None:
+            ws.update([[hourly_wage]], "B2")
     return ws, wb
 
 def find_next_row(ws):
-    all_vals = ws.col_values(3)
+    all_vals = ws.col_values(1)
     return len(all_vals) + 1
 
-def add_monthly_summary_if_needed(ws, year, month, staff_name, hourly_wage):
-    date_col = ws.col_values(3)
+def add_monthly_summary_if_needed(ws, year, month):
+    date_col = ws.col_values(1)
     month_prefix = f"{year:04d}-{month:02d}"
     rows_in_month = [i+1 for i, v in enumerate(date_col) if v.startswith(month_prefix)]
     if not rows_in_month:
@@ -97,18 +106,18 @@ def add_monthly_summary_if_needed(ws, year, month, staff_name, hourly_wage):
     next_after_last = last_row + 1
     vals_after = ws.row_values(next_after_last) if next_after_last <= len(date_col)+1 else []
     summary_label = f"{month}月 合計"
-    sf_hours = f"=SUM(I{first_row}:I{last_row})"
-    sf_pay   = f"=SUM(J{first_row}:J{last_row})"
-    sf_trans = f"=SUM(K{first_row}:K{last_row})"
-    sf_total = f"=SUM(L{first_row}:L{last_row})"
+    sf_hours = f"=SUM(G{first_row}:G{last_row})"
+    sf_pay   = f"=SUM(H{first_row}:H{last_row})"
+    sf_trans = f"=SUM(I{first_row}:I{last_row})"
+    sf_total = f"=SUM(J{first_row}:J{last_row})"
 
-    row_data = [[staff_name, hourly_wage, summary_label, "", "", "", "", "", sf_hours, sf_pay, sf_trans, sf_total]]
-    if vals_after and len(vals_after) > 2 and vals_after[2] == summary_label:
+    row_data = [[summary_label, "", "", "", "", "", sf_hours, sf_pay, sf_trans, sf_total]]
+    if vals_after and vals_after[0] == summary_label:
         ws.update(row_data, f"A{next_after_last}", value_input_option="USER_ENTERED")
     else:
         ws.append_row(row_data[0], value_input_option="USER_ENTERED")
         summary_row = find_next_row(ws) - 1
-        ws.format(f"A{summary_row}:L{summary_row}", {
+        ws.format(f"A{summary_row}:J{summary_row}", {
             "textFormat": {"bold": True},
             "backgroundColor": {"red": 0.85, "green": 0.93, "blue": 1.0}
         })
@@ -118,13 +127,12 @@ def record_to_sheet(staff_name, clock_in_dt, clock_out_dt, hourly_wage, transpor
     if not gc:
         return False, "Google Sheets未認証"
 
-    ws, wb = get_or_create_staff_sheet(gc, staff_name)
+    ws, wb = get_or_create_staff_sheet(gc, staff_name, hourly_wage)
 
     # 給与計算の基準: 出勤打刻がシフト開始より早い場合はシフト開始時間を使う
     pay_start_dt = clock_in_dt
-    if shift_start:
-        if clock_in_dt < shift_start:
-            pay_start_dt = shift_start
+    if shift_start and clock_in_dt < shift_start:
+        pay_start_dt = shift_start
 
     hours = (clock_out_dt - pay_start_dt).total_seconds() / 3600
     pay = round(hours * hourly_wage)
@@ -135,18 +143,17 @@ def record_to_sheet(staff_name, clock_in_dt, clock_out_dt, hourly_wage, transpor
     shift_start_str = shift_start.strftime("%H:%M") if shift_start else ""
     shift_end_str = shift_end.strftime("%H:%M") if shift_end else ""
 
-    row_data = [staff_name, hourly_wage, date_str, weekday,
-                shift_start_str, shift_end_str,
+    row_data = [date_str, weekday, shift_start_str, shift_end_str,
                 clock_in_dt.strftime("%H:%M"), clock_out_dt.strftime("%H:%M"),
                 round(hours, 2), pay, transport, total]
 
-    all_dates = ws.col_values(3)
+    all_dates = ws.col_values(1)
     if all_dates and "月 合計" in all_dates[-1]:
         ws.insert_row(row_data, len(all_dates))
     else:
         ws.append_row(row_data)
 
-    add_monthly_summary_if_needed(ws, clock_in_dt.year, clock_in_dt.month, staff_name, hourly_wage)
+    add_monthly_summary_if_needed(ws, clock_in_dt.year, clock_in_dt.month)
     return True, None
 
 def get_monthly_records(staff_name, year, month):
@@ -163,8 +170,8 @@ def get_monthly_records(staff_name, year, month):
     month_prefix = f"{year:04d}-{month:02d}"
     all_rows = ws.get_all_values()
     records = []
-    for row in all_rows[1:]:  # ヘッダースキップ
-        if len(row) >= 3 and row[2].startswith(month_prefix):
+    for row in all_rows[3:]:  # 情報行2行＋ヘッダー行をスキップ
+        if len(row) >= 1 and row[0].startswith(month_prefix):
             records.append(row)
     return records, None
 
@@ -719,18 +726,18 @@ def mypage(staff_id):
 
     if records_raw:
         for row in records_raw:
-            # row: [名前, 時給, 日付, 曜日, シフト開始, シフト終了, 出勤, 退勤, 合計h, 給与, 交通費, 合計]
+            # row: [日付, 曜日, シフト開始, シフト終了, 出勤, 退勤, 合計h, 給与, 交通費, 合計]
             try:
-                hours = float(row[8]) if len(row) > 8 and row[8] else 0
-                pay = int(row[9]) if len(row) > 9 and row[9] else 0
-                transport = int(row[10]) if len(row) > 10 and row[10] else 0
+                hours = float(row[6]) if len(row) > 6 and row[6] else 0
+                pay = int(row[7]) if len(row) > 7 and row[7] else 0
+                transport = int(row[8]) if len(row) > 8 and row[8] else 0
                 records.append({
-                    "date": row[2],
-                    "weekday": row[3] if len(row) > 3 else "",
-                    "shift_start": row[4] if len(row) > 4 else "",
-                    "shift_end": row[5] if len(row) > 5 else "",
-                    "clock_in": row[6] if len(row) > 6 else "",
-                    "clock_out": row[7] if len(row) > 7 else "",
+                    "date": row[0],
+                    "weekday": row[1] if len(row) > 1 else "",
+                    "shift_start": row[2] if len(row) > 2 else "",
+                    "shift_end": row[3] if len(row) > 3 else "",
+                    "clock_in": row[4] if len(row) > 4 else "",
+                    "clock_out": row[5] if len(row) > 5 else "",
                     "hours": hours,
                     "pay": pay,
                     "transport": transport,

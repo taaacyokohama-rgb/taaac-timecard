@@ -65,8 +65,8 @@ def get_sheets_client():
 
 WEEKDAYS_JP = ["月", "火", "水", "木", "金", "土", "日"]
 
-# 列定義: A=名前, B=時給, C=日付, D=曜日, E=出勤, F=退勤, G=合計時間(h), H=給与, I=交通費, J=合計
-HEADER_ROW = ["名前", "時給", "日付", "曜日", "出勤時間", "退勤時間", "合計時間(h)", "給与(円)", "交通費(円)", "合計(円)"]
+# 列定義: A=名前, B=時給, C=日付, D=曜日, E=シフト開始, F=シフト終了, G=出勤, H=退勤, I=合計時間(h), J=給与, K=交通費, L=合計
+HEADER_ROW = ["名前", "時給", "日付", "曜日", "シフト開始", "シフト終了", "出勤時間", "退勤時間", "合計時間(h)", "給与(円)", "交通費(円)", "合計(円)"]
 
 def get_or_create_staff_sheet(gc, staff_name):
     wb = gc.open_by_key(SPREADSHEET_ID)
@@ -97,36 +97,46 @@ def add_monthly_summary_if_needed(ws, year, month, staff_name, hourly_wage):
     next_after_last = last_row + 1
     vals_after = ws.row_values(next_after_last) if next_after_last <= len(date_col)+1 else []
     summary_label = f"{month}月 合計"
-    sf_hours = f"=SUM(G{first_row}:G{last_row})"
-    sf_pay   = f"=SUM(H{first_row}:H{last_row})"
-    sf_trans = f"=SUM(I{first_row}:I{last_row})"
-    sf_total = f"=SUM(J{first_row}:J{last_row})"
+    sf_hours = f"=SUM(I{first_row}:I{last_row})"
+    sf_pay   = f"=SUM(J{first_row}:J{last_row})"
+    sf_trans = f"=SUM(K{first_row}:K{last_row})"
+    sf_total = f"=SUM(L{first_row}:L{last_row})"
 
-    row_data = [[staff_name, hourly_wage, summary_label, "", "", "", sf_hours, sf_pay, sf_trans, sf_total]]
+    row_data = [[staff_name, hourly_wage, summary_label, "", "", "", "", "", sf_hours, sf_pay, sf_trans, sf_total]]
     if vals_after and len(vals_after) > 2 and vals_after[2] == summary_label:
         ws.update(row_data, f"A{next_after_last}", value_input_option="USER_ENTERED")
     else:
         ws.append_row(row_data[0], value_input_option="USER_ENTERED")
         summary_row = find_next_row(ws) - 1
-        ws.format(f"A{summary_row}:J{summary_row}", {
+        ws.format(f"A{summary_row}:L{summary_row}", {
             "textFormat": {"bold": True},
             "backgroundColor": {"red": 0.85, "green": 0.93, "blue": 1.0}
         })
 
-def record_to_sheet(staff_name, clock_in_dt, clock_out_dt, hourly_wage, transport):
+def record_to_sheet(staff_name, clock_in_dt, clock_out_dt, hourly_wage, transport, shift_start=None, shift_end=None):
     gc = get_sheets_client()
     if not gc:
         return False, "Google Sheets未認証"
 
     ws, wb = get_or_create_staff_sheet(gc, staff_name)
 
-    hours = (clock_out_dt - clock_in_dt).total_seconds() / 3600
+    # 給与計算の基準: 出勤打刻がシフト開始より早い場合はシフト開始時間を使う
+    pay_start_dt = clock_in_dt
+    if shift_start:
+        if clock_in_dt < shift_start:
+            pay_start_dt = shift_start
+
+    hours = (clock_out_dt - pay_start_dt).total_seconds() / 3600
     pay = round(hours * hourly_wage)
     total = pay + transport
     weekday = WEEKDAYS_JP[clock_in_dt.weekday()]
     date_str = clock_in_dt.strftime("%Y-%m-%d")
 
+    shift_start_str = shift_start.strftime("%H:%M") if shift_start else ""
+    shift_end_str = shift_end.strftime("%H:%M") if shift_end else ""
+
     row_data = [staff_name, hourly_wage, date_str, weekday,
+                shift_start_str, shift_end_str,
                 clock_in_dt.strftime("%H:%M"), clock_out_dt.strftime("%H:%M"),
                 round(hours, 2), pay, transport, total]
 
@@ -159,7 +169,7 @@ def get_monthly_records(staff_name, year, month):
     return records, None
 
 # ========== セッション管理 ==========
-active_sessions = {}  # staff_id -> {"clock_in": datetime}
+active_sessions = {}  # staff_id -> {"clock_in": datetime, "shift_start": datetime|None, "shift_end": datetime|None}
 
 # ========== HTML テンプレート ==========
 
@@ -193,6 +203,12 @@ PUNCH_HTML = """
   .msg.success { background: #e8f7ee; color: #27ae60; }
   .msg.error { background: #fdecea; color: #e74c3c; }
   .mypage-link { display: block; margin-top: 18px; color: #3498db; font-size: 14px; text-decoration: none; }
+  .shift-form { margin-bottom: 18px; text-align: left; }
+  .shift-form label { font-size: 12px; color: #888; display: block; margin-bottom: 6px; }
+  .shift-row { display: flex; gap: 8px; align-items: center; }
+  .shift-row span { font-size: 13px; color: #666; }
+  .shift-row input[type=time] { flex: 1; padding: 10px 8px; border: 1px solid #ddd; border-radius: 8px; font-size: 15px; text-align: center; }
+  .shift-info { font-size: 13px; color: #666; background: #f8f8f8; border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; text-align: left; }
 </style>
 </head>
 <body>
@@ -211,8 +227,19 @@ PUNCH_HTML = """
   {% else %}
   <form method="post">
     {% if is_clocked_in %}
+    {% if shift_start %}
+    <div class="shift-info">シフト {{ shift_start }}〜{{ shift_end or "?" }}</div>
+    {% endif %}
     <button class="btn btn-out" type="submit" name="action" value="out">退勤する</button>
     {% else %}
+    <div class="shift-form">
+      <label>シフト時間（任意）</label>
+      <div class="shift-row">
+        <input type="time" name="shift_start" placeholder="開始">
+        <span>〜</span>
+        <input type="time" name="shift_end" placeholder="終了">
+      </div>
+    </div>
     <button class="btn btn-in" type="submit" name="action" value="in">出勤する</button>
     {% endif %}
   </form>
@@ -320,12 +347,13 @@ MYPAGE_HTML = """
     <h2>勤務記録</h2>
     <table>
       <tr>
-        <th>日付</th><th>曜日</th><th>出勤</th><th>退勤</th><th>時間</th><th>給与</th>{% if has_transport %}<th>交通費</th>{% endif %}
+        <th>日付</th><th>曜日</th><th>シフト</th><th>出勤</th><th>退勤</th><th>時間</th><th>給与</th>{% if has_transport %}<th>交通費</th>{% endif %}
       </tr>
       {% for r in records %}
       <tr>
         <td>{{ r.date[5:] }}</td>
         <td class="{{ 'sat' if r.weekday == '土' else ('sun' if r.weekday == '日' else '') }}">{{ r.weekday }}</td>
+        <td style="font-size:12px;color:#888;">{% if r.shift_start %}{{ r.shift_start }}〜{{ r.shift_end }}{% else %}—{% endif %}</td>
         <td>{{ r.clock_in }}</td>
         <td>{{ r.clock_out }}</td>
         <td>{{ r.hours }}h</td>
@@ -483,6 +511,8 @@ ADMIN_HTML = """
           {% endfor %}
         </select>
         <input type="date" name="date" required style="flex:1.5">
+        <input type="time" name="shift_start" placeholder="シフト開始" style="flex:1">
+        <input type="time" name="shift_end" placeholder="シフト終了" style="flex:1">
         <input type="time" name="clock_in" placeholder="出勤" required style="flex:1">
         <input type="time" name="clock_out" placeholder="退勤" required style="flex:1">
         <button type="submit" style="background:#8e44ad;">追加</button>
@@ -604,17 +634,36 @@ def punch(staff_id):
     if request.method == "POST":
         action = request.form.get("action")
         if action == "in" and not is_clocked_in:
-            active_sessions[staff_id] = {"clock_in": now}
+            shift_start_str = request.form.get("shift_start", "").strip()
+            shift_end_str = request.form.get("shift_end", "").strip()
+            today = now.date()
+            shift_start_dt = None
+            shift_end_dt = None
+            if shift_start_str:
+                try:
+                    shift_start_dt = datetime.strptime(f"{today} {shift_start_str}", "%Y-%m-%d %H:%M").replace(tzinfo=JST)
+                except ValueError:
+                    pass
+            if shift_end_str:
+                try:
+                    shift_end_dt = datetime.strptime(f"{today} {shift_end_str}", "%Y-%m-%d %H:%M").replace(tzinfo=JST)
+                except ValueError:
+                    pass
+            active_sessions[staff_id] = {"clock_in": now, "shift_start": shift_start_dt, "shift_end": shift_end_dt}
             message = f"出勤しました ✓ {now.strftime('%H:%M')}"
             msg_type = "success"
             is_clocked_in = True
             clock_in_time = now.strftime("%H:%M")
         elif action == "out" and is_clocked_in:
-            clock_in_dt = active_sessions.pop(staff_id)["clock_in"]
+            session_data = active_sessions.pop(staff_id)
+            clock_in_dt = session_data["clock_in"]
+            shift_start_dt = session_data.get("shift_start")
+            shift_end_dt = session_data.get("shift_end")
             transport = s.get("transport", 0)
-            ok, err = record_to_sheet(s["name"], clock_in_dt, now, s["wage"], transport)
+            ok, err = record_to_sheet(s["name"], clock_in_dt, now, s["wage"], transport, shift_start_dt, shift_end_dt)
             if ok:
-                hours = (now - clock_in_dt).total_seconds() / 3600
+                pay_start = shift_start_dt if (shift_start_dt and clock_in_dt < shift_start_dt) else clock_in_dt
+                hours = (now - pay_start).total_seconds() / 3600
                 pay = round(hours * s["wage"])
                 total = pay + transport
                 message = f"退勤しました ✓ {now.strftime('%H:%M')}｜{hours:.1f}h｜¥{total:,}"
@@ -624,12 +673,17 @@ def punch(staff_id):
                 msg_type = "success"
             is_clocked_in = False
 
+    shift_start = active_sessions[staff_id]["shift_start"].strftime("%H:%M") if is_clocked_in and active_sessions.get(staff_id, {}).get("shift_start") else None
+    shift_end = active_sessions[staff_id]["shift_end"].strftime("%H:%M") if is_clocked_in and active_sessions.get(staff_id, {}).get("shift_end") else None
+
     return render_template_string(
         PUNCH_HTML,
         staff_id=staff_id,
         name=s["name"],
         is_clocked_in=is_clocked_in,
         clock_in_time=clock_in_time,
+        shift_start=shift_start,
+        shift_end=shift_end,
         message=message,
         msg_type=msg_type
     )
@@ -665,16 +719,18 @@ def mypage(staff_id):
 
     if records_raw:
         for row in records_raw:
-            # row: [名前, 時給, 日付, 曜日, 出勤, 退勤, 合計h, 給与, 交通費, 合計]
+            # row: [名前, 時給, 日付, 曜日, シフト開始, シフト終了, 出勤, 退勤, 合計h, 給与, 交通費, 合計]
             try:
-                hours = float(row[6]) if len(row) > 6 and row[6] else 0
-                pay = int(row[7]) if len(row) > 7 and row[7] else 0
-                transport = int(row[8]) if len(row) > 8 and row[8] else 0
+                hours = float(row[8]) if len(row) > 8 and row[8] else 0
+                pay = int(row[9]) if len(row) > 9 and row[9] else 0
+                transport = int(row[10]) if len(row) > 10 and row[10] else 0
                 records.append({
                     "date": row[2],
                     "weekday": row[3] if len(row) > 3 else "",
-                    "clock_in": row[4] if len(row) > 4 else "",
-                    "clock_out": row[5] if len(row) > 5 else "",
+                    "shift_start": row[4] if len(row) > 4 else "",
+                    "shift_end": row[5] if len(row) > 5 else "",
+                    "clock_in": row[6] if len(row) > 6 else "",
+                    "clock_out": row[7] if len(row) > 7 else "",
                     "hours": hours,
                     "pay": pay,
                     "transport": transport,
@@ -818,6 +874,8 @@ def manual_punch():
     date_str = request.form.get("date")
     clock_in_str = request.form.get("clock_in")
     clock_out_str = request.form.get("clock_out")
+    shift_start_str = request.form.get("shift_start", "").strip()
+    shift_end_str = request.form.get("shift_end", "").strip()
 
     if not all([staff_id, date_str, clock_in_str, clock_out_str]) or staff_id not in staff:
         session["flash_msg"] = "入力内容を確認してください"
@@ -827,6 +885,8 @@ def manual_punch():
     s = staff[staff_id]
     clock_in_dt = datetime.strptime(f"{date_str} {clock_in_str}", "%Y-%m-%d %H:%M").replace(tzinfo=JST)
     clock_out_dt = datetime.strptime(f"{date_str} {clock_out_str}", "%Y-%m-%d %H:%M").replace(tzinfo=JST)
+    shift_start_dt = datetime.strptime(f"{date_str} {shift_start_str}", "%Y-%m-%d %H:%M").replace(tzinfo=JST) if shift_start_str else None
+    shift_end_dt = datetime.strptime(f"{date_str} {shift_end_str}", "%Y-%m-%d %H:%M").replace(tzinfo=JST) if shift_end_str else None
 
     if clock_out_dt <= clock_in_dt:
         session["flash_msg"] = "退勤時刻は出勤時刻より後にしてください"
@@ -834,8 +894,9 @@ def manual_punch():
         return redirect(url_for("admin"))
 
     transport = s.get("transport", 0)
-    ok, err = record_to_sheet(s["name"], clock_in_dt, clock_out_dt, s["wage"], transport)
-    hours = (clock_out_dt - clock_in_dt).total_seconds() / 3600
+    ok, err = record_to_sheet(s["name"], clock_in_dt, clock_out_dt, s["wage"], transport, shift_start_dt, shift_end_dt)
+    pay_start = shift_start_dt if (shift_start_dt and clock_in_dt < shift_start_dt) else clock_in_dt
+    hours = (clock_out_dt - pay_start).total_seconds() / 3600
     pay = round(hours * s["wage"])
     total = pay + transport
 

@@ -126,25 +126,15 @@ def record_to_sheet(staff_name, clock_in_dt, clock_out_dt, hourly_wage, transpor
     weekday = WEEKDAYS_JP[clock_in_dt.weekday()]
     date_str = clock_in_dt.strftime("%Y-%m-%d")
 
-    date_col = ws.col_values(3)
-    existing_row = None
-    for i, v in enumerate(date_col):
-        if v == date_str:
-            existing_row = i + 1
-            break
-
     row_data = [staff_name, hourly_wage, date_str, weekday,
                 clock_in_dt.strftime("%H:%M"), clock_out_dt.strftime("%H:%M"),
                 round(hours, 2), pay, transport, total]
 
-    if existing_row:
-        ws.update([row_data], f"A{existing_row}")
+    all_dates = ws.col_values(3)
+    if all_dates and "月 合計" in all_dates[-1]:
+        ws.insert_row(row_data, len(all_dates))
     else:
-        all_dates = ws.col_values(3)
-        if all_dates and "月 合計" in all_dates[-1]:
-            ws.insert_row(row_data, len(all_dates))
-        else:
-            ws.append_row(row_data)
+        ws.append_row(row_data)
 
     add_monthly_summary_if_needed(ws, clock_in_dt.year, clock_in_dt.month, staff_name, hourly_wage)
     return True, None

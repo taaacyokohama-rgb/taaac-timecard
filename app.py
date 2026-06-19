@@ -33,6 +33,26 @@ SERVICE_ACCOUNT_FILE = Path(__file__).parent / "service_account.json"
 STAFF_FILE = Path(__file__).parent / "staff.json"
 ADMIN_PASSWORD = "taaac2026"
 
+# ========== Google Sheets ==========
+
+def get_sheets_client():
+    # 環境変数からサービスアカウントJSON取得（Render用）
+    sa_json = os.environ.get("SERVICE_ACCOUNT_JSON")
+    if sa_json:
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            f.write(sa_json)
+            tmp_path = f.name
+        creds = service_account.Credentials.from_service_account_file(tmp_path, scopes=SCOPES)
+        os.unlink(tmp_path)
+    elif SERVICE_ACCOUNT_FILE.exists():
+        creds = service_account.Credentials.from_service_account_file(
+            str(SERVICE_ACCOUNT_FILE), scopes=SCOPES
+        )
+    else:
+        return None
+    return gspread.authorize(creds)
+
 # ========== スタッフデータ管理 ==========
 
 STAFF_SHEET_NAME = "スタッフ"
@@ -100,26 +120,6 @@ def save_staff(data):
             print(f"スタッフ保存エラー: {e}")
     # フォールバック: ローカルファイル
     STAFF_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-# ========== Google Sheets ==========
-
-def get_sheets_client():
-    # 環境変数からサービスアカウントJSON取得（Render用）
-    sa_json = os.environ.get("SERVICE_ACCOUNT_JSON")
-    if sa_json:
-        import tempfile
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-            f.write(sa_json)
-            tmp_path = f.name
-        creds = service_account.Credentials.from_service_account_file(tmp_path, scopes=SCOPES)
-        os.unlink(tmp_path)
-    elif SERVICE_ACCOUNT_FILE.exists():
-        creds = service_account.Credentials.from_service_account_file(
-            str(SERVICE_ACCOUNT_FILE), scopes=SCOPES
-        )
-    else:
-        return None
-    return gspread.authorize(creds)
 
 WEEKDAYS_JP = ["月", "火", "水", "木", "金", "土", "日"]
 

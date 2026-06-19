@@ -35,12 +35,70 @@ ADMIN_PASSWORD = "taaac2026"
 
 # ========== スタッフデータ管理 ==========
 
+STAFF_SHEET_NAME = "スタッフ"
+
 def load_staff():
+    gc = get_sheets_client()
+    if gc:
+        try:
+            wb = gc.open_by_key(SPREADSHEET_ID)
+            try:
+                ws = wb.worksheet(STAFF_SHEET_NAME)
+            except gspread.WorksheetNotFound:
+                ws = wb.add_worksheet(title=STAFF_SHEET_NAME, rows=100, cols=4)
+                ws.update([["スタッフID", "名前", "時給", "交通費"]], "A1")
+                ws.format("A1:D1", {
+                    "textFormat": {"bold": True},
+                    "backgroundColor": {"red": 0.2, "green": 0.2, "blue": 0.2},
+                    "horizontalAlignment": "CENTER"
+                })
+                # staff.jsonがあれば初回移行
+                if STAFF_FILE.exists():
+                    existing = json.loads(STAFF_FILE.read_text(encoding="utf-8"))
+                    rows = [[sid, s["name"], s["wage"], s.get("transport", 0)] for sid, s in existing.items()]
+                    if rows:
+                        ws.append_rows(rows, value_input_option="USER_ENTERED")
+                return json.loads(STAFF_FILE.read_text(encoding="utf-8")) if STAFF_FILE.exists() else {}
+            rows = ws.get_all_values()
+            staff = {}
+            for row in rows[1:]:
+                if len(row) >= 3 and row[0]:
+                    staff[row[0]] = {
+                        "name": row[1],
+                        "wage": int(row[2]) if row[2] else 0,
+                        "transport": int(row[3]) if len(row) > 3 and row[3] else 0,
+                    }
+            return staff
+        except Exception as e:
+            print(f"スタッフ読み込みエラー: {e}")
+    # フォールバック: ローカルファイル
     if STAFF_FILE.exists():
         return json.loads(STAFF_FILE.read_text(encoding="utf-8"))
     return {}
 
 def save_staff(data):
+    gc = get_sheets_client()
+    if gc:
+        try:
+            wb = gc.open_by_key(SPREADSHEET_ID)
+            try:
+                ws = wb.worksheet(STAFF_SHEET_NAME)
+            except gspread.WorksheetNotFound:
+                ws = wb.add_worksheet(title=STAFF_SHEET_NAME, rows=100, cols=4)
+            ws.clear()
+            ws.update([["スタッフID", "名前", "時給", "交通費"]], "A1")
+            ws.format("A1:D1", {
+                "textFormat": {"bold": True},
+                "backgroundColor": {"red": 0.2, "green": 0.2, "blue": 0.2},
+                "horizontalAlignment": "CENTER"
+            })
+            rows = [[sid, s["name"], s["wage"], s.get("transport", 0)] for sid, s in data.items()]
+            if rows:
+                ws.append_rows(rows, value_input_option="USER_ENTERED")
+            return
+        except Exception as e:
+            print(f"スタッフ保存エラー: {e}")
+    # フォールバック: ローカルファイル
     STAFF_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 # ========== Google Sheets ==========

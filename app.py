@@ -517,11 +517,26 @@ ADMIN_HTML = """
           <option value="{{ sid }}">{{ s.name }}</option>
           {% endfor %}
         </select>
-        <input type="date" name="date" required style="flex:1.5">
-        <input type="time" name="shift_start" placeholder="シフト開始" style="flex:1">
-        <input type="time" name="shift_end" placeholder="シフト終了" style="flex:1">
-        <input type="time" name="clock_in" placeholder="出勤" required style="flex:1">
-        <input type="time" name="clock_out" placeholder="退勤" required style="flex:1">
+        <div style="flex:1.5;display:flex;flex-direction:column;gap:3px;">
+          <label style="font-size:11px;color:#888;">日付</label>
+          <input type="date" name="date" required style="width:100%;">
+        </div>
+        <div style="flex:1;display:flex;flex-direction:column;gap:3px;">
+          <label style="font-size:11px;color:#888;">シフト開始</label>
+          <input type="time" name="shift_start" style="width:100%;">
+        </div>
+        <div style="flex:1;display:flex;flex-direction:column;gap:3px;">
+          <label style="font-size:11px;color:#888;">シフト終了</label>
+          <input type="time" name="shift_end" style="width:100%;">
+        </div>
+        <div style="flex:1;display:flex;flex-direction:column;gap:3px;">
+          <label style="font-size:11px;color:#888;">出勤打刻</label>
+          <input type="time" name="clock_in" required style="width:100%;">
+        </div>
+        <div style="flex:1;display:flex;flex-direction:column;gap:3px;">
+          <label style="font-size:11px;color:#888;">退勤打刻</label>
+          <input type="time" name="clock_out" required style="width:100%;">
+        </div>
         <button type="submit" style="background:#8e44ad;">追加</button>
       </div>
     </form>

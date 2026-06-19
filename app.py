@@ -1019,6 +1019,98 @@ def qr_image(staff_id):
 def index():
     return redirect(url_for("admin"))
 
+@app.route("/admin/migrate_sheets")
+def migrate_sheets():
+    if not session.get("admin"):
+        return redirect(url_for("admin_login"))
+
+    gc = get_sheets_client()
+    if not gc:
+        return "Google Sheets未認証", 500
+
+    staff = load_staff()
+    wb = gc.open_by_key(SPREADSHEET_ID)
+    results = []
+
+    for ws in wb.worksheets():
+        name = ws.title
+        # スタッフシートと月次サマリー以外のシートを対象に
+        if name in (STAFF_SHEET_NAME,):
+            continue
+        # スタッフ名と一致するシートのみ処理
+        staff_info = next((s for s in staff.values() if s["name"] == name), None)
+        if not staff_info:
+            continue
+
+        all_rows = ws.get_all_values()
+        if not all_rows:
+            results.append(f"{name}: 空のシート、スキップ")
+            continue
+
+        # フォーマット判定
+        header = all_rows[0]
+        if header and header[0] == "スタッフ名":
+            results.append(f"{name}: 既に新フォーマット、スキップ")
+            continue
+
+        # 旧フォーマットのデータ抽出
+        data_rows = []
+        summary_labels = []
+        for row in all_rows[1:]:
+            if not row or not row[0]:
+                continue
+            # 月合計行の判定（旧: A=名前 C=月合計, または A=月合計）
+            if len(row) > 2 and "月 合計" in str(row[2]):
+                summary_labels.append(row[2])
+                data_rows.append(("summary", row[2]))
+                continue
+            if "月 合計" in str(row[0]):
+                summary_labels.append(row[0])
+                data_rows.append(("summary", row[0]))
+                continue
+
+            # 旧12列フォーマット: [名前,時給,日付,曜日,シフト開始,シフト終了,出勤,退勤,合計h,給与,交通費,合計]
+            if len(row) >= 12 and row[2].startswith("20"):
+                data_rows.append(("data", [row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[9], row[10], row[11]]))
+            # 旧10列フォーマット: [名前,時給,日付,曜日,出勤,退勤,合計h,給与,交通費,合計]
+            elif len(row) >= 10 and row[2].startswith("20"):
+                data_rows.append(("data", [row[2], row[3], "", "", row[4], row[5], row[6], row[7], row[8], row[9]]))
+            else:
+                continue
+
+        # シートを新フォーマットで書き直す
+        ws.clear()
+        ws.update([["スタッフ名", name]], "A1")
+        ws.update([["時給", staff_info["wage"]]], "A2")
+        ws.update([HEADER_ROW], "A3")
+        ws.format("A1:B2", {"textFormat": {"bold": True}})
+        ws.format("A3:J3", {
+            "textFormat": {"bold": True, "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
+            "backgroundColor": {"red": 0.2, "green": 0.2, "blue": 0.2},
+            "horizontalAlignment": "CENTER"
+        })
+
+        current_row = 4
+        summary_row_nums = []
+        for item in data_rows:
+            if item[0] == "summary":
+                ws.append_row([item[1]] + [""] * 9, value_input_option="USER_ENTERED")
+                summary_row_nums.append(current_row)
+            else:
+                ws.append_row(item[1], value_input_option="USER_ENTERED")
+            current_row += 1
+
+        for r in summary_row_nums:
+            ws.format(f"A{r}:J{r}", {
+                "textFormat": {"bold": True},
+                "backgroundColor": {"red": 0.85, "green": 0.93, "blue": 1.0}
+            })
+
+        data_count = len([d for d in data_rows if d[0] == "data"])
+        results.append(f"{name}: {data_count}件移行完了")
+
+    return "<br>".join(results) + "<br><br><a href='/admin'>管理画面に戻る</a>"
+
 if __name__ == "__main__":
     print("=" * 50)
     print("TAAAC 出退勤管理システム起動")

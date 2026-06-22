@@ -697,6 +697,34 @@ def add_ngrok_header(response):
     response.headers["ngrok-skip-browser-warning"] = "true"
     return response
 
+def _session_key(staff_id, field):
+    return f"punch_{staff_id}_{field}"
+
+def _restore_from_cookie(staff_id):
+    """サーバー再起動後もクッキーから打刻状態を復元する"""
+    if staff_id in active_sessions:
+        return
+    clock_in_iso = session.get(_session_key(staff_id, "clock_in"))
+    if clock_in_iso:
+        try:
+            clock_in_dt = datetime.fromisoformat(clock_in_iso)
+            shift_start_iso = session.get(_session_key(staff_id, "shift_start"))
+            shift_end_iso = session.get(_session_key(staff_id, "shift_end"))
+            shift_start_dt = datetime.fromisoformat(shift_start_iso) if shift_start_iso else None
+            shift_end_dt = datetime.fromisoformat(shift_end_iso) if shift_end_iso else None
+            active_sessions[staff_id] = {"clock_in": clock_in_dt, "shift_start": shift_start_dt, "shift_end": shift_end_dt}
+        except Exception:
+            pass
+
+def _save_to_cookie(staff_id, clock_in_dt, shift_start_dt, shift_end_dt):
+    session[_session_key(staff_id, "clock_in")] = clock_in_dt.isoformat()
+    session[_session_key(staff_id, "shift_start")] = shift_start_dt.isoformat() if shift_start_dt else ""
+    session[_session_key(staff_id, "shift_end")] = shift_end_dt.isoformat() if shift_end_dt else ""
+
+def _clear_cookie(staff_id):
+    for field in ("clock_in", "shift_start", "shift_end"):
+        session.pop(_session_key(staff_id, field), None)
+
 @app.route("/punch/<staff_id>", methods=["GET", "POST"])
 def punch(staff_id):
     staff = load_staff()
@@ -705,6 +733,10 @@ def punch(staff_id):
 
     s = staff[staff_id]
     now = datetime.now(JST)
+
+    # サーバー再起動後にクッキーから復元
+    _restore_from_cookie(staff_id)
+
     is_clocked_in = staff_id in active_sessions
     clock_in_time = active_sessions[staff_id]["clock_in"].strftime("%H:%M") if is_clocked_in else None
 
@@ -730,12 +762,14 @@ def punch(staff_id):
                 except ValueError:
                     pass
             active_sessions[staff_id] = {"clock_in": now, "shift_start": shift_start_dt, "shift_end": shift_end_dt}
+            _save_to_cookie(staff_id, now, shift_start_dt, shift_end_dt)
             message = f"出勤しました ✓ {now.strftime('%H:%M')}"
             msg_type = "success"
             is_clocked_in = True
             clock_in_time = now.strftime("%H:%M")
         elif action == "out" and is_clocked_in:
             session_data = active_sessions.pop(staff_id)
+            _clear_cookie(staff_id)
             clock_in_dt = session_data["clock_in"]
             shift_start_dt = session_data.get("shift_start")
             shift_end_dt = session_data.get("shift_end")

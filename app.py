@@ -24,7 +24,9 @@ except ImportError as e:
     exit(1)
 
 app = Flask(__name__)
-app.secret_key = "taaac-timecard-secret-2026"
+app.secret_key = os.environ.get("SECRET_KEY", "taaac-timecard-secret-2026")
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=24)
 
 JST = timezone(timedelta(hours=9))
 SPREADSHEET_ID = "1zLlshmq5AK1SoSG0Ezc1KhQbarI6g5_0H3lOwSYJOJU"
@@ -762,6 +764,7 @@ def punch(staff_id):
                 except ValueError:
                     pass
             active_sessions[staff_id] = {"clock_in": now, "shift_start": shift_start_dt, "shift_end": shift_end_dt}
+            session.permanent = True
             _save_to_cookie(staff_id, now, shift_start_dt, shift_end_dt)
             message = f"出勤しました ✓ {now.strftime('%H:%M')}"
             msg_type = "success"

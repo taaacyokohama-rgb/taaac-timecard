@@ -236,6 +236,28 @@ def record_clock_out_to_sheet(staff_name, clock_in_dt, clock_out_dt, hourly_wage
     add_monthly_summary_if_needed(ws, clock_in_dt.year, clock_in_dt.month)
     return True, None
 
+def get_open_clockin(staff_name):
+    """今日の未退勤行（退勤時間が空）を返す: (row_num, clock_in_time, shift_start, shift_end) or None"""
+    gc = get_sheets_client()
+    if not gc:
+        return None
+    try:
+        wb = gc.open_by_key(SPREADSHEET_ID)
+        ws = wb.worksheet(staff_name)
+        today = datetime.now(JST).strftime("%Y-%m-%d")
+        all_rows = ws.get_all_values()
+        for i, row in enumerate(all_rows[3:], start=4):
+            if len(row) >= 5 and row[0] == today and row[4] and not row[5]:
+                return {
+                    "row_num": i,
+                    "clock_in": row[4],
+                    "shift_start": row[2],
+                    "shift_end": row[3],
+                }
+    except Exception:
+        pass
+    return None
+
 def get_monthly_records(staff_name, year, month):
     """スタッフの月別勤務データをスプシから取得"""
     gc = get_sheets_client()
@@ -290,12 +312,15 @@ PUNCH_HTML = """
   .msg.success { background: #e8f7ee; color: #27ae60; }
   .msg.error { background: #fdecea; color: #e74c3c; }
   .mypage-link { display: block; margin-top: 18px; color: #3498db; font-size: 14px; text-decoration: none; }
-  .shift-form { margin-bottom: 18px; text-align: left; }
+  .shift-form { margin-bottom: 14px; text-align: left; }
   .shift-form label { font-size: 12px; color: #888; display: block; margin-bottom: 6px; }
   .shift-row { display: flex; gap: 8px; align-items: center; }
   .shift-row span { font-size: 13px; color: #666; }
   .shift-row input[type=time] { flex: 1; padding: 10px 8px; border: 1px solid #ddd; border-radius: 8px; font-size: 15px; text-align: center; }
-  .shift-info { font-size: 13px; color: #666; background: #f8f8f8; border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; text-align: left; }
+  .btn-row { display: flex; gap: 10px; margin-top: 4px; }
+  .btn-row .btn { flex: 1; padding: 16px 8px; font-size: 16px; }
+  .status.in { background: #e8f7ee; color: #27ae60; }
+  .status.out { background: #fef9e7; color: #f39c12; }
 </style>
 </head>
 <body>
@@ -304,8 +329,8 @@ PUNCH_HTML = """
   <h1>{{ name }} さん</h1>
   <div class="time" id="clock">--:--:--</div>
   <div class="date" id="date"></div>
-  {% if is_clocked_in %}
-  <div class="status in">● 出勤中（{{ clock_in_time }}〜）</div>
+  {% if open_clockin %}
+  <div class="status in">● 出勤中（{{ open_clockin.clock_in }}〜）</div>
   {% else %}
   <div class="status out">○ 未出勤</div>
   {% endif %}
@@ -313,22 +338,18 @@ PUNCH_HTML = """
   <div class="msg {{ msg_type }}">{{ message }}</div>
   {% else %}
   <form method="post">
-    {% if is_clocked_in %}
-    {% if shift_start %}
-    <div class="shift-info">シフト {{ shift_start }}〜{{ shift_end or "?" }}</div>
-    {% endif %}
-    <button class="btn btn-out" type="submit" name="action" value="out">退勤する</button>
-    {% else %}
     <div class="shift-form">
-      <label>シフト時間（任意）</label>
+      <label>シフト時間（出勤時に入力・任意）</label>
       <div class="shift-row">
-        <input type="time" name="shift_start" placeholder="開始">
+        <input type="time" name="shift_start">
         <span>〜</span>
-        <input type="time" name="shift_end" placeholder="終了">
+        <input type="time" name="shift_end">
       </div>
     </div>
-    <button class="btn btn-in" type="submit" name="action" value="in">出勤する</button>
-    {% endif %}
+    <div class="btn-row">
+      <button class="btn btn-in" type="submit" name="action" value="in">出勤</button>
+      <button class="btn btn-out" type="submit" name="action" value="out">退勤</button>
+    </div>
   </form>
   {% endif %}
   <a class="mypage-link" href="/mypage/{{ staff_id }}">📊 今月の実績を見る</a>
@@ -762,78 +783,73 @@ def punch(staff_id):
 
     s = staff[staff_id]
     now = datetime.now(JST)
-
-    # サーバー再起動後にクッキーから復元
-    _restore_from_cookie(staff_id)
-
-    is_clocked_in = staff_id in active_sessions
-    clock_in_time = active_sessions[staff_id]["clock_in"].strftime("%H:%M") if is_clocked_in else None
-
     message = None
     msg_type = None
 
     if request.method == "POST":
         action = request.form.get("action")
-        if action == "in" and not is_clocked_in:
-            shift_start_str = request.form.get("shift_start", "").strip()
-            shift_end_str = request.form.get("shift_end", "").strip()
-            today = now.date()
-            shift_start_dt = None
-            shift_end_dt = None
-            if shift_start_str:
-                try:
-                    shift_start_dt = datetime.strptime(f"{today} {shift_start_str}", "%Y-%m-%d %H:%M").replace(tzinfo=JST)
-                except ValueError:
-                    pass
-            if shift_end_str:
-                try:
-                    shift_end_dt = datetime.strptime(f"{today} {shift_end_str}", "%Y-%m-%d %H:%M").replace(tzinfo=JST)
-                except ValueError:
-                    pass
-            # 出勤時点でスプシに記録
+        shift_start_str = request.form.get("shift_start", "").strip()
+        shift_end_str = request.form.get("shift_end", "").strip()
+        today = now.date()
+        shift_start_dt = None
+        shift_end_dt = None
+        if shift_start_str:
+            try:
+                shift_start_dt = datetime.strptime(f"{today} {shift_start_str}", "%Y-%m-%d %H:%M").replace(tzinfo=JST)
+            except ValueError:
+                pass
+        if shift_end_str:
+            try:
+                shift_end_dt = datetime.strptime(f"{today} {shift_end_str}", "%Y-%m-%d %H:%M").replace(tzinfo=JST)
+            except ValueError:
+                pass
+
+        if action == "in":
             row_num, err = record_clock_in_to_sheet(s["name"], now, s["wage"], shift_start_dt, shift_end_dt)
-            active_sessions[staff_id] = {"clock_in": now, "shift_start": shift_start_dt, "shift_end": shift_end_dt, "row_num": row_num}
-            session.permanent = True
-            _save_to_cookie(staff_id, now, shift_start_dt, shift_end_dt, row_num)
             if row_num:
-                message = f"出勤しました ✓ {now.strftime('%H:%M')}（スプシ記録済）"
+                message = f"出勤しました ✓ {now.strftime('%H:%M')}"
             else:
                 message = f"出勤しました ✓ {now.strftime('%H:%M')}（スプシ未接続: {err}）"
             msg_type = "success"
-            is_clocked_in = True
-            clock_in_time = now.strftime("%H:%M")
-        elif action == "out" and is_clocked_in:
-            session_data = active_sessions.pop(staff_id)
-            _clear_cookie(staff_id)
-            clock_in_dt = session_data["clock_in"]
-            shift_start_dt = session_data.get("shift_start")
-            shift_end_dt = session_data.get("shift_end")
-            row_num = session_data.get("row_num")
-            transport = s.get("transport", 0)
-            ok, err = record_clock_out_to_sheet(s["name"], clock_in_dt, now, s["wage"], transport, row_num, shift_start_dt, shift_end_dt)
-            if ok:
-                pay_start = shift_start_dt if (shift_start_dt and clock_in_dt < shift_start_dt) else clock_in_dt
-                hours = (now - pay_start).total_seconds() / 3600
-                pay = round(hours * s["wage"])
-                total = pay + transport
-                message = f"退勤しました ✓ {now.strftime('%H:%M')}｜{hours:.1f}h｜¥{total:,}"
-                msg_type = "success"
-            else:
-                message = f"退勤記録 ✓ {now.strftime('%H:%M')}（スプシ未接続: {err}）"
-                msg_type = "success"
-            is_clocked_in = False
 
-    shift_start = active_sessions[staff_id]["shift_start"].strftime("%H:%M") if is_clocked_in and active_sessions.get(staff_id, {}).get("shift_start") else None
-    shift_end = active_sessions[staff_id]["shift_end"].strftime("%H:%M") if is_clocked_in and active_sessions.get(staff_id, {}).get("shift_end") else None
+        elif action == "out":
+            open_row = get_open_clockin(s["name"])
+            if open_row:
+                clock_in_dt = datetime.strptime(
+                    f"{now.strftime('%Y-%m-%d')} {open_row['clock_in']}", "%Y-%m-%d %H:%M"
+                ).replace(tzinfo=JST)
+                shift_start_dt = datetime.strptime(
+                    f"{now.strftime('%Y-%m-%d')} {open_row['shift_start']}", "%Y-%m-%d %H:%M"
+                ).replace(tzinfo=JST) if open_row["shift_start"] else None
+                shift_end_dt = datetime.strptime(
+                    f"{now.strftime('%Y-%m-%d')} {open_row['shift_end']}", "%Y-%m-%d %H:%M"
+                ).replace(tzinfo=JST) if open_row["shift_end"] else None
+                transport = s.get("transport", 0)
+                ok, err = record_clock_out_to_sheet(
+                    s["name"], clock_in_dt, now, s["wage"], transport,
+                    open_row["row_num"], shift_start_dt, shift_end_dt
+                )
+                if ok:
+                    pay_start = shift_start_dt if (shift_start_dt and clock_in_dt < shift_start_dt) else clock_in_dt
+                    hours = (now - pay_start).total_seconds() / 3600
+                    pay = round(hours * s["wage"])
+                    total = pay + transport
+                    message = f"退勤しました ✓ {now.strftime('%H:%M')}｜{hours:.1f}h｜¥{total:,}"
+                else:
+                    message = f"退勤記録 ✓ {now.strftime('%H:%M')}（スプシ未接続: {err}）"
+            else:
+                message = "本日の出勤記録が見つかりません"
+                msg_type = "error"
+            if msg_type != "error":
+                msg_type = "success"
+
+    open_clockin = get_open_clockin(s["name"]) if not message else None
 
     return render_template_string(
         PUNCH_HTML,
         staff_id=staff_id,
         name=s["name"],
-        is_clocked_in=is_clocked_in,
-        clock_in_time=clock_in_time,
-        shift_start=shift_start,
-        shift_end=shift_end,
+        open_clockin=open_clockin,
         message=message,
         msg_type=msg_type
     )

@@ -318,7 +318,7 @@ PUNCH_HTML = """
   .shift-row span { font-size: 13px; color: #666; }
   .shift-row input[type=time] { flex: 1; padding: 10px 8px; border: 1px solid #ddd; border-radius: 8px; font-size: 15px; text-align: center; }
   .btn-row { display: flex; gap: 10px; margin-top: 4px; }
-  .btn-row .btn { flex: 1; padding: 16px 8px; font-size: 16px; }
+  .btn-row .btn { flex: 1; width: auto; padding: 16px 8px; font-size: 16px; }
   .status.in { background: #e8f7ee; color: #27ae60; }
   .status.out { background: #fef9e7; color: #f39c12; }
 </style>

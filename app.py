@@ -182,14 +182,40 @@ def add_monthly_summary_if_needed(ws, year, month):
             "backgroundColor": {"red": 0.85, "green": 0.93, "blue": 1.0}
         })
 
-def record_to_sheet(staff_name, clock_in_dt, clock_out_dt, hourly_wage, transport, shift_start=None, shift_end=None):
+def record_clock_in_to_sheet(staff_name, clock_in_dt, hourly_wage, shift_start=None, shift_end=None):
+    """出勤時点でスプシに記録（退勤欄は空）"""
+    gc = get_sheets_client()
+    if not gc:
+        return None, "Google Sheets未認証"
+
+    ws, wb = get_or_create_staff_sheet(gc, staff_name, hourly_wage)
+
+    weekday = WEEKDAYS_JP[clock_in_dt.weekday()]
+    date_str = clock_in_dt.strftime("%Y-%m-%d")
+    shift_start_str = shift_start.strftime("%H:%M") if shift_start else ""
+    shift_end_str = shift_end.strftime("%H:%M") if shift_end else ""
+
+    row_data = [date_str, weekday, shift_start_str, shift_end_str,
+                clock_in_dt.strftime("%H:%M"), "", "", "", "", ""]
+
+    all_dates = ws.col_values(1)
+    if all_dates and "月 合計" in all_dates[-1]:
+        insert_pos = len(all_dates)
+        ws.insert_row(row_data, insert_pos)
+        return insert_pos, None
+    else:
+        ws.append_row(row_data)
+        row_num = len(ws.col_values(1))
+        return row_num, None
+
+def record_clock_out_to_sheet(staff_name, clock_in_dt, clock_out_dt, hourly_wage, transport, row_num, shift_start=None, shift_end=None):
+    """退勤時にスプシの出勤行を更新"""
     gc = get_sheets_client()
     if not gc:
         return False, "Google Sheets未認証"
 
     ws, wb = get_or_create_staff_sheet(gc, staff_name, hourly_wage)
 
-    # 給与計算の基準: 出勤打刻がシフト開始より早い場合はシフト開始時間を使う
     pay_start_dt = clock_in_dt
     if shift_start and clock_in_dt < shift_start:
         pay_start_dt = shift_start
@@ -199,20 +225,14 @@ def record_to_sheet(staff_name, clock_in_dt, clock_out_dt, hourly_wage, transpor
     total = pay + transport
     weekday = WEEKDAYS_JP[clock_in_dt.weekday()]
     date_str = clock_in_dt.strftime("%Y-%m-%d")
-
     shift_start_str = shift_start.strftime("%H:%M") if shift_start else ""
     shift_end_str = shift_end.strftime("%H:%M") if shift_end else ""
 
-    row_data = [date_str, weekday, shift_start_str, shift_end_str,
-                clock_in_dt.strftime("%H:%M"), clock_out_dt.strftime("%H:%M"),
-                round(hours, 2), pay, transport, total]
+    row_data = [[date_str, weekday, shift_start_str, shift_end_str,
+                 clock_in_dt.strftime("%H:%M"), clock_out_dt.strftime("%H:%M"),
+                 round(hours, 2), pay, transport, total]]
 
-    all_dates = ws.col_values(1)
-    if all_dates and "月 合計" in all_dates[-1]:
-        ws.insert_row(row_data, len(all_dates))
-    else:
-        ws.append_row(row_data)
-
+    ws.update(row_data, f"A{row_num}")
     add_monthly_summary_if_needed(ws, clock_in_dt.year, clock_in_dt.month)
     return True, None
 
@@ -714,17 +734,24 @@ def _restore_from_cookie(staff_id):
             shift_end_iso = session.get(_session_key(staff_id, "shift_end"))
             shift_start_dt = datetime.fromisoformat(shift_start_iso) if shift_start_iso else None
             shift_end_dt = datetime.fromisoformat(shift_end_iso) if shift_end_iso else None
-            active_sessions[staff_id] = {"clock_in": clock_in_dt, "shift_start": shift_start_dt, "shift_end": shift_end_dt}
+            row_num = session.get(_session_key(staff_id, "row_num"))
+            active_sessions[staff_id] = {
+                "clock_in": clock_in_dt,
+                "shift_start": shift_start_dt,
+                "shift_end": shift_end_dt,
+                "row_num": int(row_num) if row_num else None,
+            }
         except Exception:
             pass
 
-def _save_to_cookie(staff_id, clock_in_dt, shift_start_dt, shift_end_dt):
+def _save_to_cookie(staff_id, clock_in_dt, shift_start_dt, shift_end_dt, row_num=None):
     session[_session_key(staff_id, "clock_in")] = clock_in_dt.isoformat()
     session[_session_key(staff_id, "shift_start")] = shift_start_dt.isoformat() if shift_start_dt else ""
     session[_session_key(staff_id, "shift_end")] = shift_end_dt.isoformat() if shift_end_dt else ""
+    session[_session_key(staff_id, "row_num")] = str(row_num) if row_num else ""
 
 def _clear_cookie(staff_id):
-    for field in ("clock_in", "shift_start", "shift_end"):
+    for field in ("clock_in", "shift_start", "shift_end", "row_num"):
         session.pop(_session_key(staff_id, field), None)
 
 @app.route("/punch/<staff_id>", methods=["GET", "POST"])
@@ -763,10 +790,15 @@ def punch(staff_id):
                     shift_end_dt = datetime.strptime(f"{today} {shift_end_str}", "%Y-%m-%d %H:%M").replace(tzinfo=JST)
                 except ValueError:
                     pass
-            active_sessions[staff_id] = {"clock_in": now, "shift_start": shift_start_dt, "shift_end": shift_end_dt}
+            # 出勤時点でスプシに記録
+            row_num, err = record_clock_in_to_sheet(s["name"], now, s["wage"], shift_start_dt, shift_end_dt)
+            active_sessions[staff_id] = {"clock_in": now, "shift_start": shift_start_dt, "shift_end": shift_end_dt, "row_num": row_num}
             session.permanent = True
-            _save_to_cookie(staff_id, now, shift_start_dt, shift_end_dt)
-            message = f"出勤しました ✓ {now.strftime('%H:%M')}"
+            _save_to_cookie(staff_id, now, shift_start_dt, shift_end_dt, row_num)
+            if row_num:
+                message = f"出勤しました ✓ {now.strftime('%H:%M')}（スプシ記録済）"
+            else:
+                message = f"出勤しました ✓ {now.strftime('%H:%M')}（スプシ未接続: {err}）"
             msg_type = "success"
             is_clocked_in = True
             clock_in_time = now.strftime("%H:%M")
@@ -776,8 +808,9 @@ def punch(staff_id):
             clock_in_dt = session_data["clock_in"]
             shift_start_dt = session_data.get("shift_start")
             shift_end_dt = session_data.get("shift_end")
+            row_num = session_data.get("row_num")
             transport = s.get("transport", 0)
-            ok, err = record_to_sheet(s["name"], clock_in_dt, now, s["wage"], transport, shift_start_dt, shift_end_dt)
+            ok, err = record_clock_out_to_sheet(s["name"], clock_in_dt, now, s["wage"], transport, row_num, shift_start_dt, shift_end_dt)
             if ok:
                 pay_start = shift_start_dt if (shift_start_dt and clock_in_dt < shift_start_dt) else clock_in_dt
                 hours = (now - pay_start).total_seconds() / 3600

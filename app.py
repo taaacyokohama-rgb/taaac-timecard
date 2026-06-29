@@ -1060,7 +1060,11 @@ def manual_punch():
         return redirect(url_for("admin"))
 
     transport = s.get("transport", 0)
-    ok, err = record_to_sheet(s["name"], clock_in_dt, clock_out_dt, s["wage"], transport, shift_start_dt, shift_end_dt)
+    row_num, err = record_clock_in_to_sheet(s["name"], clock_in_dt, s["wage"], shift_start_dt, shift_end_dt)
+    if row_num:
+        ok, err = record_clock_out_to_sheet(s["name"], clock_in_dt, clock_out_dt, s["wage"], transport, row_num, shift_start_dt, shift_end_dt)
+    else:
+        ok = False
     pay_start = shift_start_dt if (shift_start_dt and clock_in_dt < shift_start_dt) else clock_in_dt
     hours = (clock_out_dt - pay_start).total_seconds() / 3600
     pay = round(hours * s["wage"])

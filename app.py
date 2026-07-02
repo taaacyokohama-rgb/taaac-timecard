@@ -1334,21 +1334,14 @@ def _migrate_june_impl():
             new_ws = new_wb.add_worksheet(title=name, rows=200, cols=10)
 
         wage = staff_info["wage"]
-        new_ws.update([["スタッフ名", name]], "A1")
-        new_ws.update([["時給", wage]], "A2")
-        new_ws.update([HEADER_ROW], "A3")
-        new_ws.format("A1:B2", {"textFormat": {"bold": True}})
-        new_ws.format("A3:J3", {
-            "textFormat": {"bold": True, "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
-            "backgroundColor": {"red": 0.2, "green": 0.2, "blue": 0.2},
-            "horizontalAlignment": "CENTER"
-        })
-
-        for item in june_rows:
-            row_data = item[1]
-            if len(row_data) < 10:
-                row_data = row_data + [""] * (10 - len(row_data))
-            new_ws.append_row(row_data, value_input_option="USER_ENTERED")
+        # ヘッダー + データを一括書き込み
+        all_data = [
+            ["スタッフ名", name],
+            ["時給", wage],
+            HEADER_ROW,
+        ] + [item[1] + [""] * (10 - len(item[1])) for item in june_rows]
+        new_ws.update(all_data, "A1", value_input_option="USER_ENTERED")
+        import time; time.sleep(2)  # レート制限対策
 
         results.append(f"{name}: {len(june_rows)}件の6月データを移行完了")
 

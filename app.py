@@ -1272,9 +1272,8 @@ def migrate_june():
     results = []
 
     # 2026-06用スプレッドシートを作成/取得
-    new_ss_id = get_or_create_monthly_spreadsheet(gc, 2026, 6)
-    new_wb = gc.open_by_key(new_ss_id)
-    results.append(f"移行先スプレッドシート作成: TAAAC出退勤_2026-06 (ID: {new_ss_id})")
+    new_wb = get_or_create_monthly_spreadsheet(gc, 2026, 6)
+    results.append(f"移行先スプレッドシート作成: TAAAC出退勤_2026-06 (ID: {new_wb.id})")
 
     for ws in old_wb.worksheets():
         name = ws.title
@@ -1351,7 +1350,7 @@ def migrate_june():
     except:
         pass
 
-    results.append(f'<a href="https://docs.google.com/spreadsheets/d/{new_ss_id}" target="_blank">移行先スプレッドシートを開く</a>')
+    results.append(f'<a href="https://docs.google.com/spreadsheets/d/{new_wb.id}" target="_blank">移行先スプレッドシートを開く</a>')
     return "<br>".join(results) + "<br><br><a href='/admin'>管理画面に戻る</a>"
 
 if __name__ == "__main__":

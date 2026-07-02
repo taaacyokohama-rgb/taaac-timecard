@@ -1258,6 +1258,102 @@ def migrate_sheets():
 
     return "<br>".join(results) + "<br><br><a href='/admin'>管理画面に戻る</a>"
 
+@app.route("/admin/migrate_june")
+def migrate_june():
+    if not session.get("admin"):
+        return redirect(url_for("admin_login"))
+
+    gc = get_sheets_client()
+    if not gc:
+        return "Google Sheets未認証", 500
+
+    staff = load_staff()
+    old_wb = gc.open_by_key(SPREADSHEET_ID)
+    results = []
+
+    # 2026-06用スプレッドシートを作成/取得
+    new_ss_id = get_or_create_monthly_spreadsheet(gc, 2026, 6)
+    new_wb = gc.open_by_key(new_ss_id)
+    results.append(f"移行先スプレッドシート作成: TAAAC出退勤_2026-06 (ID: {new_ss_id})")
+
+    for ws in old_wb.worksheets():
+        name = ws.title
+        if name in (STAFF_SHEET_NAME,):
+            continue
+        staff_info = next((s for s in staff.values() if s["name"] == name), None)
+        if not staff_info:
+            continue
+
+        all_rows = ws.get_all_values()
+        if not all_rows:
+            continue
+
+        # データ行の抽出（6月のみ）
+        june_rows = []
+        # 新フォーマット (row1=スタッフ名, row2=時給, row3=ヘッダー, row4+=データ)
+        header = all_rows[0]
+        if header and header[0] == "スタッフ名":
+            data_start = 3  # 0-indexed: row index 3 = row 4
+            for row in all_rows[data_start:]:
+                if not row or not row[0]:
+                    continue
+                if "月 合計" in str(row[0]):
+                    continue
+                if row[0].startswith("2026-06"):
+                    june_rows.append(("data", row[:10]))
+        else:
+            # 旧フォーマット
+            for row in all_rows[1:]:
+                if not row or not row[0]:
+                    continue
+                if "月 合計" in str(row[2] if len(row) > 2 else ""):
+                    continue
+                if len(row) >= 12 and row[2].startswith("2026-06"):
+                    june_rows.append(("data", [row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[9], row[10], row[11]]))
+                elif len(row) >= 10 and row[2].startswith("2026-06"):
+                    june_rows.append(("data", [row[2], row[3], "", "", row[4], row[5], row[6], row[7], row[8], row[9]]))
+
+        if not june_rows:
+            results.append(f"{name}: 6月データなし、スキップ")
+            continue
+
+        # 移行先に新しいシートを作成
+        try:
+            new_ws = new_wb.worksheet(name)
+            new_ws.clear()
+        except gspread.exceptions.WorksheetNotFound:
+            new_ws = new_wb.add_worksheet(title=name, rows=200, cols=10)
+
+        wage = staff_info["wage"]
+        new_ws.update([["スタッフ名", name]], "A1")
+        new_ws.update([["時給", wage]], "A2")
+        new_ws.update([HEADER_ROW], "A3")
+        new_ws.format("A1:B2", {"textFormat": {"bold": True}})
+        new_ws.format("A3:J3", {
+            "textFormat": {"bold": True, "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
+            "backgroundColor": {"red": 0.2, "green": 0.2, "blue": 0.2},
+            "horizontalAlignment": "CENTER"
+        })
+
+        for item in june_rows:
+            row_data = item[1]
+            if len(row_data) < 10:
+                row_data = row_data + [""] * (10 - len(row_data))
+            new_ws.append_row(row_data, value_input_option="USER_ENTERED")
+
+        results.append(f"{name}: {len(june_rows)}件の6月データを移行完了")
+
+    # デフォルトシート(Sheet1)があれば削除
+    try:
+        default_ws = new_wb.worksheet("Sheet1")
+        new_wb.del_worksheet(default_ws)
+        results.append("デフォルトSheet1を削除")
+    except:
+        pass
+
+    results.append(f'<a href="https://docs.google.com/spreadsheets/d/{new_ss_id}" target="_blank">移行先スプレッドシートを開く</a>')
+    return "<br>".join(results) + "<br><br><a href='/admin'>管理画面に戻る</a>"
+
 if __name__ == "__main__":
     print("=" * 50)
     print("TAAAC 出退勤管理システム起動")

@@ -1278,9 +1278,12 @@ def _migrate_june_impl():
     old_wb = gc.open_by_key(SPREADSHEET_ID)
     results = []
 
-    # 2026-06用スプレッドシートを作成/取得
-    new_wb = get_or_create_monthly_spreadsheet(gc, 2026, 6)
-    results.append(f"移行先スプレッドシート作成: TAAAC出退勤_2026-06 (ID: {new_wb.id})")
+    # 2026-06用スプレッドシート（手動作成済み）
+    JUNE_SS_ID = "1hWuPrBnueFL1xiAzLTq5ex8FUEq5msA0fPZkBy5owkI"
+    new_wb = gc.open_by_key(JUNE_SS_ID)
+    # キャッシュに登録してget_or_create_staff_sheetでも使えるようにする
+    _monthly_ss_cache[(2026, 6)] = JUNE_SS_ID
+    results.append(f"移行先スプレッドシート: TAAAC出退勤_2026-06 (ID: {JUNE_SS_ID})")
 
     for ws in old_wb.worksheets():
         name = ws.title

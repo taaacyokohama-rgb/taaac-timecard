@@ -1263,6 +1263,13 @@ def migrate_june():
     if not session.get("admin"):
         return redirect(url_for("admin_login"))
 
+    try:
+        return _migrate_june_impl()
+    except Exception as e:
+        import traceback
+        return f"エラー: {e}<br><pre>{traceback.format_exc()}</pre>", 500
+
+def _migrate_june_impl():
     gc = get_sheets_client()
     if not gc:
         return "Google Sheets未認証", 500

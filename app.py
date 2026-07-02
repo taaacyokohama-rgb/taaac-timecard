@@ -634,7 +634,7 @@ ADMIN_HTML = """
 <header>
   <h1>TAAAC 出退勤管理</h1>
   <div style="display:flex;gap:8px;">
-    <a href="https://docs.google.com/spreadsheets/d/1zLlshmq5AK1SoSG0Ezc1KhQbarI6g5_0H3lOwSYJOJU/edit" class="logout" target="_blank">管理画面</a>
+    <a href="https://drive.google.com/drive/u/0/folders/1-OSqYzfAcA8XE31GqoT7V1c-JsZgtldc" class="logout" target="_blank">管理画面</a>
     <a href="/admin/logout" class="logout">ログアウト</a>
   </div>
 </header>

@@ -634,7 +634,8 @@ ADMIN_HTML = """
 <header>
   <h1>TAAAC 出退勤管理</h1>
   <div style="display:flex;gap:8px;">
-    <a href="https://drive.google.com/drive/u/0/folders/1-OSqYzfAcA8XE31GqoT7V1c-JsZgtldc" class="logout" target="_blank">管理画面</a>
+    <a href="/summary" class="logout">📊 集計</a>
+    <a href="https://drive.google.com/drive/u/0/folders/1-OSqYzfAcA8XE31GqoT7V1c-JsZgtldc" class="logout" target="_blank">Drive</a>
     <a href="/admin/logout" class="logout">ログアウト</a>
   </div>
 </header>
@@ -1171,6 +1172,153 @@ def qr_image(staff_id):
 
     from flask import send_file
     return send_file(buf, mimetype="image/png")
+
+@app.route("/summary")
+@app.route("/summary/<int:year>/<int:month>")
+def summary(year=None, month=None):
+    if not session.get("admin"):
+        return redirect(url_for("admin_login"))
+    now = datetime.now(JST)
+    year = year or now.year
+    month = month or now.month
+
+    staff = load_staff()
+    gc = get_sheets_client()
+
+    rows_by_staff = {}
+    error_msg = None
+    if gc:
+        try:
+            wb = get_or_create_monthly_spreadsheet(gc, year, month)
+            for s in staff.values():
+                name = s["name"]
+                try:
+                    ws = wb.worksheet(name)
+                    all_rows = ws.get_all_values()
+                    month_prefix = f"{year:04d}-{month:02d}"
+                    data = [r for r in all_rows[3:] if len(r) >= 1 and r[0].startswith(month_prefix)]
+                    rows_by_staff[name] = data
+                except Exception:
+                    rows_by_staff[name] = []
+        except Exception as e:
+            error_msg = str(e)
+
+    # 集計
+    summary_data = []
+    total_hours = 0.0
+    total_pay = 0
+    total_transport = 0
+    for s in staff.values():
+        name = s["name"]
+        rows = rows_by_staff.get(name, [])
+        count = len(rows)
+        h = sum(float(r[6]) for r in rows if len(r) > 6 and r[6] and r[6] not in ("", "-"))
+        pay = sum(int(r[7]) for r in rows if len(r) > 7 and r[7] and r[7].lstrip("-").isdigit())
+        tr = sum(int(r[8]) for r in rows if len(r) > 8 and r[8] and r[8].lstrip("-").isdigit())
+        total_hours += h
+        total_pay += pay
+        total_transport += tr
+        if count > 0:
+            summary_data.append({"name": name, "count": count, "hours": h, "pay": pay, "transport": tr})
+
+    # 前月・次月
+    prev_month = month - 1 if month > 1 else 12
+    prev_year = year if month > 1 else year - 1
+    next_month = month + 1 if month < 12 else 1
+    next_year = year if month < 12 else year + 1
+
+    html = f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>月次集計 {year}年{month}月</title>
+<style>
+* {{ box-sizing: border-box; margin: 0; padding: 0; }}
+body {{ font-family: -apple-system, sans-serif; background: #f0f2f5; min-height: 100vh; }}
+header {{ background: #1a1a2e; color: white; padding: 16px 20px; display: flex; align-items: center; justify-content: space-between; }}
+header h1 {{ font-size: 17px; font-weight: 700; }}
+.back-btn {{ color: #aaa; text-decoration: none; font-size: 14px; }}
+.nav {{ display: flex; align-items: center; justify-content: center; gap: 16px; padding: 16px; background: white; border-bottom: 1px solid #eee; }}
+.nav a {{ color: #3498db; text-decoration: none; font-size: 20px; padding: 4px 12px; }}
+.nav-title {{ font-size: 17px; font-weight: bold; color: #222; }}
+.container {{ padding: 16px; max-width: 480px; margin: 0 auto; }}
+.total-card {{ background: linear-gradient(135deg, #1a1a2e, #16213e); color: white; border-radius: 16px; padding: 24px; margin-bottom: 16px; }}
+.total-card h2 {{ font-size: 13px; color: #aaa; margin-bottom: 16px; letter-spacing: 1px; }}
+.total-grid {{ display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }}
+.total-item {{ text-align: center; }}
+.total-label {{ font-size: 11px; color: #aaa; margin-bottom: 4px; }}
+.total-value {{ font-size: 20px; font-weight: bold; }}
+.total-value.green {{ color: #2ecc71; }}
+.total-value.blue {{ color: #3498db; }}
+.total-value.yellow {{ color: #f1c40f; }}
+.section-title {{ font-size: 13px; font-weight: bold; color: #888; letter-spacing: 1px; margin-bottom: 10px; }}
+.member-card {{ background: white; border-radius: 12px; padding: 16px; margin-bottom: 10px; display: flex; align-items: center; gap: 14px; box-shadow: 0 1px 4px rgba(0,0,0,0.06); }}
+.member-avatar {{ width: 44px; height: 44px; border-radius: 50%; background: #e8f4fd; display: flex; align-items: center; justify-content: center; font-size: 18px; flex-shrink: 0; }}
+.member-info {{ flex: 1; min-width: 0; }}
+.member-name {{ font-size: 15px; font-weight: bold; color: #222; margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+.member-stats {{ font-size: 12px; color: #888; }}
+.member-right {{ text-align: right; flex-shrink: 0; }}
+.member-pay {{ font-size: 16px; font-weight: bold; color: #27ae60; }}
+.member-hours {{ font-size: 12px; color: #aaa; }}
+.badge {{ display: inline-block; background: #3498db; color: white; border-radius: 20px; padding: 2px 10px; font-size: 12px; font-weight: bold; }}
+.empty {{ text-align: center; padding: 40px; color: #aaa; font-size: 14px; }}
+</style>
+</head>
+<body>
+<header>
+  <h1>📊 月次集計</h1>
+  <a href="/admin" class="back-btn">管理画面</a>
+</header>
+<div class="nav">
+  <a href="/summary/{prev_year}/{prev_month}">←</a>
+  <span class="nav-title">{year}年{month}月</span>
+  <a href="/summary/{next_year}/{next_month}">→</a>
+</div>
+<div class="container">
+"""
+    if error_msg:
+        html += f'<div style="background:#fdecea;color:#e74c3c;padding:12px;border-radius:8px;margin-bottom:16px;font-size:13px;">{error_msg}</div>'
+
+    html += f"""
+  <div class="total-card">
+    <h2>TODAY'S MONTH TOTAL</h2>
+    <div class="total-grid">
+      <div class="total-item">
+        <div class="total-label">合計給与</div>
+        <div class="total-value green">¥{total_pay:,}</div>
+      </div>
+      <div class="total-item">
+        <div class="total-label">合計時間</div>
+        <div class="total-value blue">{total_hours:.1f}h</div>
+      </div>
+      <div class="total-item">
+        <div class="total-label">交通費</div>
+        <div class="total-value yellow">¥{total_transport:,}</div>
+      </div>
+    </div>
+  </div>
+  <div class="section-title">メンバー別</div>
+"""
+    if not summary_data:
+        html += '<div class="empty">出勤データがありません</div>'
+    else:
+        for d in sorted(summary_data, key=lambda x: x["pay"], reverse=True):
+            html += f"""
+  <div class="member-card">
+    <div class="member-avatar">👤</div>
+    <div class="member-info">
+      <div class="member-name">{d["name"]}</div>
+      <div class="member-stats"><span class="badge">{d["count"]}回</span> &nbsp; {d["hours"]:.1f}h &nbsp; 交通費 ¥{d["transport"]:,}</div>
+    </div>
+    <div class="member-right">
+      <div class="member-pay">¥{d["pay"]:,}</div>
+      <div class="member-hours">給与</div>
+    </div>
+  </div>"""
+
+    html += "\n</div></body></html>"
+    return html
 
 @app.route("/")
 def index():

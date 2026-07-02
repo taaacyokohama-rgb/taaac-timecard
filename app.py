@@ -137,6 +137,7 @@ _monthly_ss_cache = {}
 # サービスアカウントのDrive容量不足のため、手動作成済みスプレッドシートのIDを登録
 _PRECREATED_SS = {
     (2026, 6): "1hWuPrBnueFL1xiAzLTq5ex8FUEq5msA0fPZkBy5owkI",
+    (2026, 7): "1SubXg-EQ9wRREhc97-MAqJ7G8efKNdJT83AzmnBUE28",
 }
 
 def get_monthly_spreadsheet_title(year, month):

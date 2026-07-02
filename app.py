@@ -130,12 +130,21 @@ WEEKDAYS_JP = ["月", "火", "水", "木", "金", "土", "日"]
 HEADER_ROW = ["日付", "曜日", "シフト開始", "シフト終了", "出勤時間", "退勤時間", "合計時間(h)", "給与(円)", "交通費(円)", "合計(円)"]
 DATA_START_ROW = 4  # 1-indexed
 
-def get_or_create_staff_sheet(gc, staff_name, hourly_wage=None):
+def get_sheet_title(staff_name, year, month):
+    return f"{staff_name}_{year}-{month:02d}"
+
+def get_or_create_staff_sheet(gc, staff_name, hourly_wage=None, year=None, month=None):
     wb = gc.open_by_key(SPREADSHEET_ID)
+    now = datetime.now(JST)
+    y = year or now.year
+    m = month or now.month
+    title = get_sheet_title(staff_name, y, m)
     try:
-        ws = wb.worksheet(staff_name)
+        ws = wb.worksheet(title)
+        if hourly_wage is not None:
+            ws.update([[hourly_wage]], "B2")
     except gspread.WorksheetNotFound:
-        ws = wb.add_worksheet(title=staff_name, rows=1000, cols=10)
+        ws = wb.add_worksheet(title=title, rows=200, cols=10)
         ws.update([["スタッフ名", staff_name]], "A1")
         ws.update([["時給", hourly_wage or ""]], "A2")
         ws.update([HEADER_ROW], "A3")
@@ -145,10 +154,6 @@ def get_or_create_staff_sheet(gc, staff_name, hourly_wage=None):
             "backgroundColor": {"red": 0.2, "green": 0.2, "blue": 0.2},
             "horizontalAlignment": "CENTER"
         })
-    else:
-        # 時給が変わっている場合に備えて更新
-        if hourly_wage is not None:
-            ws.update([[hourly_wage]], "B2")
     return ws, wb
 
 def find_next_row(ws):
@@ -188,7 +193,7 @@ def record_clock_in_to_sheet(staff_name, clock_in_dt, hourly_wage, shift_start=N
     if not gc:
         return None, "Google Sheets未認証"
 
-    ws, wb = get_or_create_staff_sheet(gc, staff_name, hourly_wage)
+    ws, wb = get_or_create_staff_sheet(gc, staff_name, hourly_wage, clock_in_dt.year, clock_in_dt.month)
 
     weekday = WEEKDAYS_JP[clock_in_dt.weekday()]
     date_str = clock_in_dt.strftime("%Y-%m-%d")
@@ -214,7 +219,7 @@ def record_clock_out_to_sheet(staff_name, clock_in_dt, clock_out_dt, hourly_wage
     if not gc:
         return False, "Google Sheets未認証"
 
-    ws, wb = get_or_create_staff_sheet(gc, staff_name, hourly_wage)
+    ws, wb = get_or_create_staff_sheet(gc, staff_name, hourly_wage, clock_in_dt.year, clock_in_dt.month)
 
     pay_start_dt = clock_in_dt
     if shift_start and clock_in_dt < shift_start:
@@ -237,14 +242,20 @@ def record_clock_out_to_sheet(staff_name, clock_in_dt, clock_out_dt, hourly_wage
     return True, None
 
 def get_open_clockin(staff_name):
-    """今日の未退勤行（退勤時間が空）を返す: (row_num, clock_in_time, shift_start, shift_end) or None"""
+    """今日の未退勤行（退勤時間が空）を返す"""
     gc = get_sheets_client()
     if not gc:
         return None
     try:
+        now = datetime.now(JST)
         wb = gc.open_by_key(SPREADSHEET_ID)
-        ws = wb.worksheet(staff_name)
-        today = datetime.now(JST).strftime("%Y-%m-%d")
+        title = get_sheet_title(staff_name, now.year, now.month)
+        try:
+            ws = wb.worksheet(title)
+        except gspread.WorksheetNotFound:
+            # 旧形式シートにフォールバック
+            ws = wb.worksheet(staff_name)
+        today = now.strftime("%Y-%m-%d")
         all_rows = ws.get_all_values()
         for i, row in enumerate(all_rows[3:], start=4):
             if len(row) >= 5 and row[0] == today and row[4] and not row[5]:
@@ -265,14 +276,22 @@ def get_monthly_records(staff_name, year, month):
         return None, "Google Sheets未認証"
     try:
         wb = gc.open_by_key(SPREADSHEET_ID)
-        ws = wb.worksheet(staff_name)
+        title = get_sheet_title(staff_name, year, month)
+        try:
+            ws = wb.worksheet(title)
+        except gspread.WorksheetNotFound:
+            # 旧形式シートにフォールバック（月別シートがない場合）
+            try:
+                ws = wb.worksheet(staff_name)
+            except gspread.WorksheetNotFound:
+                return [], None
     except Exception as e:
         return None, str(e)
 
     month_prefix = f"{year:04d}-{month:02d}"
     all_rows = ws.get_all_values()
     records = []
-    for row in all_rows[3:]:  # 情報行2行＋ヘッダー行をスキップ
+    for row in all_rows[3:]:
         if len(row) >= 1 and row[0].startswith(month_prefix):
             records.append(row)
     return records, None

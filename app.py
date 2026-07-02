@@ -134,12 +134,22 @@ OWNER_EMAIL = "taaac.yokohama@gmail.com"
 # 月別スプレッドシートIDキャッシュ: (year, month) -> spreadsheet_id
 _monthly_ss_cache = {}
 
+# サービスアカウントのDrive容量不足のため、手動作成済みスプレッドシートのIDを登録
+_PRECREATED_SS = {
+    (2026, 6): "1hWuPrBnueFL1xiAzLTq5ex8FUEq5msA0fPZkBy5owkI",
+}
+
 def get_monthly_spreadsheet_title(year, month):
     return f"TAAAC出退勤_{year}-{month:02d}"
 
 def get_or_create_monthly_spreadsheet(gc, year, month):
     """月別スプレッドシートを取得または新規作成してオーナーに共有"""
     cache_key = (year, month)
+
+    # 手動作成済みIDが登録されていればそれを使う
+    if cache_key not in _monthly_ss_cache and cache_key in _PRECREATED_SS:
+        _monthly_ss_cache[cache_key] = _PRECREATED_SS[cache_key]
+
     if cache_key in _monthly_ss_cache:
         try:
             return gc.open_by_key(_monthly_ss_cache[cache_key])
@@ -164,7 +174,6 @@ def get_or_create_monthly_spreadsheet(gc, year, month):
     except Exception as e:
         print(f"共有エラー: {e}")
 
-    # デフォルトの「シート1」を削除用に残して後で名前変更
     return wb
 
 def get_or_create_staff_sheet(gc, staff_name, hourly_wage=None, year=None, month=None):

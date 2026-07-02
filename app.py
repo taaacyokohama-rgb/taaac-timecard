@@ -130,21 +130,61 @@ WEEKDAYS_JP = ["月", "火", "水", "木", "金", "土", "日"]
 HEADER_ROW = ["日付", "曜日", "シフト開始", "シフト終了", "出勤時間", "退勤時間", "合計時間(h)", "給与(円)", "交通費(円)", "合計(円)"]
 DATA_START_ROW = 4  # 1-indexed
 
-def get_sheet_title(staff_name, year, month):
-    return f"{staff_name}_{year}-{month:02d}"
+OWNER_EMAIL = "taaac.yokohama@gmail.com"
+# 月別スプレッドシートIDキャッシュ: (year, month) -> spreadsheet_id
+_monthly_ss_cache = {}
+
+def get_monthly_spreadsheet_title(year, month):
+    return f"TAAAC出退勤_{year}-{month:02d}"
+
+def get_or_create_monthly_spreadsheet(gc, year, month):
+    """月別スプレッドシートを取得または新規作成してオーナーに共有"""
+    cache_key = (year, month)
+    if cache_key in _monthly_ss_cache:
+        try:
+            return gc.open_by_key(_monthly_ss_cache[cache_key])
+        except Exception:
+            pass
+
+    title = get_monthly_spreadsheet_title(year, month)
+    try:
+        wb = gc.open(title)
+        _monthly_ss_cache[cache_key] = wb.id
+        return wb
+    except gspread.SpreadsheetNotFound:
+        pass
+
+    # 新規作成
+    wb = gc.create(title)
+    _monthly_ss_cache[cache_key] = wb.id
+
+    # オーナーに共有
+    try:
+        wb.share(OWNER_EMAIL, perm_type="user", role="writer", notify=False)
+    except Exception as e:
+        print(f"共有エラー: {e}")
+
+    # デフォルトの「シート1」を削除用に残して後で名前変更
+    return wb
 
 def get_or_create_staff_sheet(gc, staff_name, hourly_wage=None, year=None, month=None):
-    wb = gc.open_by_key(SPREADSHEET_ID)
     now = datetime.now(JST)
     y = year or now.year
     m = month or now.month
-    title = get_sheet_title(staff_name, y, m)
+    wb = get_or_create_monthly_spreadsheet(gc, y, m)
+
     try:
-        ws = wb.worksheet(title)
+        ws = wb.worksheet(staff_name)
         if hourly_wage is not None:
             ws.update([[hourly_wage]], "B2")
     except gspread.WorksheetNotFound:
-        ws = wb.add_worksheet(title=title, rows=200, cols=10)
+        # 最初のシートをリネームするか新規追加
+        sheets = wb.worksheets()
+        if len(sheets) == 1 and sheets[0].title in ("シート1", "Sheet1"):
+            ws = sheets[0]
+            ws.update_title(staff_name)
+        else:
+            ws = wb.add_worksheet(title=staff_name, rows=200, cols=10)
         ws.update([["スタッフ名", staff_name]], "A1")
         ws.update([["時給", hourly_wage or ""]], "A2")
         ws.update([HEADER_ROW], "A3")
@@ -248,13 +288,11 @@ def get_open_clockin(staff_name):
         return None
     try:
         now = datetime.now(JST)
-        wb = gc.open_by_key(SPREADSHEET_ID)
-        title = get_sheet_title(staff_name, now.year, now.month)
+        wb = get_or_create_monthly_spreadsheet(gc, now.year, now.month)
         try:
-            ws = wb.worksheet(title)
-        except gspread.WorksheetNotFound:
-            # 旧形式シートにフォールバック
             ws = wb.worksheet(staff_name)
+        except gspread.WorksheetNotFound:
+            return None
         today = now.strftime("%Y-%m-%d")
         all_rows = ws.get_all_values()
         for i, row in enumerate(all_rows[3:], start=4):
@@ -275,15 +313,15 @@ def get_monthly_records(staff_name, year, month):
     if not gc:
         return None, "Google Sheets未認証"
     try:
-        wb = gc.open_by_key(SPREADSHEET_ID)
-        title = get_sheet_title(staff_name, year, month)
+        wb = get_or_create_monthly_spreadsheet(gc, year, month)
         try:
-            ws = wb.worksheet(title)
+            ws = wb.worksheet(staff_name)
         except gspread.WorksheetNotFound:
-            # 旧形式シートにフォールバック（月別シートがない場合）
+            # 旧形式（単一スプシ）にフォールバック
             try:
-                ws = wb.worksheet(staff_name)
-            except gspread.WorksheetNotFound:
+                old_wb = gc.open_by_key(SPREADSHEET_ID)
+                ws = old_wb.worksheet(staff_name)
+            except Exception:
                 return [], None
     except Exception as e:
         return None, str(e)

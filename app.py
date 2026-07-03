@@ -1195,8 +1195,15 @@ def summary(year=None, month=None):
                 try:
                     ws = wb.worksheet(name)
                     all_rows = ws.get_all_values()
-                    month_prefix = f"{year:04d}-{month:02d}"
-                    data = [r for r in all_rows[3:] if len(r) >= 1 and r[0].startswith(month_prefix)]
+                    # 日付フォーマットが YYYY-MM-DD / YYYY/MM/DD どちらでも対応
+                    month_patterns = (
+                        f"{year:04d}-{month:02d}",
+                        f"{year:04d}/{month:02d}",
+                        f"{year}/{month}/",
+                    )
+                    data = [r for r in all_rows[3:] if r and r[0] and
+                            any(r[0].startswith(p) for p in month_patterns)
+                            and "合計" not in r[0]]
                     rows_by_staff[name] = data
                 except Exception:
                     rows_by_staff[name] = []

@@ -264,30 +264,39 @@ def record_clock_in_to_sheet(staff_name, clock_in_dt, hourly_wage, shift_start=N
         return row_num, None
 
 def record_clock_out_to_sheet(staff_name, clock_in_dt, clock_out_dt, hourly_wage, transport, row_num, shift_start=None, shift_end=None):
-    """退勤時にスプシの出勤行を更新"""
+    """退勤時にスプシの出勤行を更新（計算列は数式で記入し手修正に対応）"""
     gc = get_sheets_client()
     if not gc:
         return False, "Google Sheets未認証"
 
     ws, wb = get_or_create_staff_sheet(gc, staff_name, hourly_wage, clock_in_dt.year, clock_in_dt.month)
 
-    pay_start_dt = clock_in_dt
-    if shift_start and clock_in_dt < shift_start:
-        pay_start_dt = shift_start
-
-    hours = (clock_out_dt - pay_start_dt).total_seconds() / 3600
-    pay = round(hours * hourly_wage)
-    total = pay + transport
     weekday = WEEKDAYS_JP[clock_in_dt.weekday()]
     date_str = clock_in_dt.strftime("%Y-%m-%d")
     shift_start_str = shift_start.strftime("%H:%M") if shift_start else ""
     shift_end_str = shift_end.strftime("%H:%M") if shift_end else ""
+    clock_in_str = clock_in_dt.strftime("%H:%M")
+    clock_out_str = clock_out_dt.strftime("%H:%M")
 
-    row_data = [[date_str, weekday, shift_start_str, shift_end_str,
-                 clock_in_dt.strftime("%H:%M"), clock_out_dt.strftime("%H:%M"),
-                 round(hours, 2), pay, transport, total]]
+    # G列: シフト開始がある場合はMAX(出勤,シフト開始)〜退勤の時間、なければ出勤〜退勤
+    # =IF(F{n}="","",IF(C{n}<>"",MAX(0,(F{n}-MAX(E{n},C{n}))*24),MAX(0,(F{n}-E{n})*24)))
+    hours_formula = (
+        f'=IF(F{row_num}="","",IF(C{row_num}<>"",'
+        f'MAX(0,(TIMEVALUE(F{row_num})-MAX(TIMEVALUE(E{row_num}),TIMEVALUE(C{row_num})))*24),'
+        f'MAX(0,(TIMEVALUE(F{row_num})-TIMEVALUE(E{row_num}))*24)))'
+    )
+    # H列: 給与 = 合計時間 × 時給(B2)
+    pay_formula = f'=IF(G{row_num}="","",ROUND(G{row_num}*$B$2))'
+    # J列: 合計 = 給与 + 交通費
+    total_formula = f'=IF(H{row_num}="","",H{row_num}+IF(I{row_num}="",0,I{row_num}))'
 
-    ws.update(row_data, f"A{row_num}")
+    ws.update(
+        [[date_str, weekday, shift_start_str, shift_end_str,
+          clock_in_str, clock_out_str,
+          hours_formula, pay_formula, transport, total_formula]],
+        f"A{row_num}",
+        value_input_option="USER_ENTERED"
+    )
     add_monthly_summary_if_needed(ws, clock_in_dt.year, clock_in_dt.month)
     return True, None
 

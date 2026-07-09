@@ -1391,10 +1391,16 @@ def update_delivery_list():
                     # [日付, 曜日, シフト開始, シフト終了, 出勤, 退勤, 合計h, 給与, 交通費, 合計]
                     clock_in  = row[4] if len(row) > 4 else ""
                     clock_out = row[5] if len(row) > 5 else ""
-                    hours     = row[6] if len(row) > 6 else ""
                     pay       = row[7] if len(row) > 7 else ""
                     if not clock_in:
                         continue
+                    # 合計時間を小数点第2位切り上げ
+                    import math
+                    raw_hours = row[6] if len(row) > 6 else ""
+                    try:
+                        hours = f"{math.ceil(float(raw_hours) * 100) / 100:.2f}"
+                    except (ValueError, TypeError):
+                        hours = raw_hours
                     all_records.append([date_val, row[1] if len(row) > 1 else "", name, clock_in, clock_out, hours, pay])
             except Exception:
                 continue

@@ -58,8 +58,13 @@ def get_sheets_client():
 # ========== スタッフデータ管理 ==========
 
 STAFF_SHEET_NAME = "スタッフ"
+_staff_cache = {"data": None, "ts": 0}  # メモリキャッシュ（60秒TTL）
+_ws_cache = {}  # (staff_name, year, month) -> worksheet
 
 def load_staff():
+    import time as _time
+    if _staff_cache["data"] and _time.time() - _staff_cache["ts"] < 60:
+        return _staff_cache["data"]
     gc = get_sheets_client()
     if gc:
         try:
@@ -90,6 +95,8 @@ def load_staff():
                         "wage": int(row[2]) if row[2] else 0,
                         "transport": int(row[3]) if len(row) > 3 and row[3] else 0,
                     }
+            _staff_cache["data"] = staff
+            _staff_cache["ts"] = _time.time()
             return staff
         except Exception as e:
             print(f"スタッフ読み込みエラー: {e}")
@@ -99,6 +106,7 @@ def load_staff():
     return {}
 
 def save_staff(data):
+    _staff_cache["data"] = None  # キャッシュ破棄
     gc = get_sheets_client()
     if gc:
         try:
@@ -181,10 +189,15 @@ def get_or_create_staff_sheet(gc, staff_name, hourly_wage=None, year=None, month
     now = datetime.now(JST)
     y = year or now.year
     m = month or now.month
+    ws_key = (staff_name, y, m)
+    if ws_key in _ws_cache:
+        return _ws_cache[ws_key], get_or_create_monthly_spreadsheet(gc, y, m)
+
     wb = get_or_create_monthly_spreadsheet(gc, y, m)
 
     try:
         ws = wb.worksheet(staff_name)
+        _ws_cache[ws_key] = ws
         if hourly_wage is not None:
             ws.update([[hourly_wage]], "B2")
     except gspread.WorksheetNotFound:
@@ -204,6 +217,7 @@ def get_or_create_staff_sheet(gc, staff_name, hourly_wage=None, year=None, month
             "backgroundColor": {"red": 0.2, "green": 0.2, "blue": 0.2},
             "horizontalAlignment": "CENTER"
         })
+        _ws_cache[ws_key] = ws
     return ws, wb
 
 def find_next_row(ws):
@@ -863,6 +877,7 @@ def punch(staff_id):
     now = datetime.now(JST)
     message = None
     msg_type = None
+    action = None
 
     if request.method == "POST":
         action = request.form.get("action")
@@ -921,7 +936,14 @@ def punch(staff_id):
             if msg_type != "error":
                 msg_type = "success"
 
-    open_clockin = get_open_clockin(s["name"]) if not message else None
+    # POST後はSheets再読み込みを避け、ボタン状態をアクションから推定
+    if message:
+        if action == "in":
+            open_clockin = {"clock_in": now.strftime("%H:%M"), "shift_start": "", "shift_end": "", "row_num": None}
+        else:
+            open_clockin = None
+    else:
+        open_clockin = get_open_clockin(s["name"])
 
     return render_template_string(
         PUNCH_HTML,

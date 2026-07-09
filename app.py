@@ -644,6 +644,7 @@ ADMIN_HTML = """
   <h1>TAAAC 出退勤管理</h1>
   <div style="display:flex;gap:8px;">
     <a href="/summary" class="logout">📊 集計</a>
+    <a href="/admin/update_delivery_list" class="logout">🚚 配達リスト更新</a>
     <a href="https://drive.google.com/drive/u/0/folders/1-OSqYzfAcA8XE31GqoT7V1c-JsZgtldc" class="logout" target="_blank">Drive</a>
     <a href="/admin/logout" class="logout">ログアウト</a>
   </div>
@@ -1335,6 +1336,105 @@ header h1 {{ font-size: 17px; font-weight: 700; }}
 
     html += "\n</div></body></html>"
     return html
+
+DELIVERY_LIST_SS_ID = "1I5EnWoK3h7pnpdhcvsSHsmzAe9d2NbmUYOKuwrnhRtI"
+
+@app.route("/admin/update_delivery_list")
+def update_delivery_list():
+    if not session.get("admin"):
+        return redirect(url_for("admin_login"))
+
+    gc = get_sheets_client()
+    if not gc:
+        return "Google Sheets未認証", 500
+
+    try:
+        delivery_wb = gc.open_by_key(DELIVERY_LIST_SS_ID)
+    except Exception as e:
+        return f"配達リストスプレッドシートを開けません: {e}", 500
+
+    staff = load_staff()
+    results = []
+
+    # 対象月: _PRECREATED_SS に登録済みの月 + 今月
+    now = datetime.now(JST)
+    target_months = set(_PRECREATED_SS.keys())
+    target_months.add((now.year, now.month))
+
+    for (year, month) in sorted(target_months):
+        sheet_name = f"{year}-{month:02d}"
+        month_prefix = f"{year:04d}-{month:02d}"
+
+        # 全スタッフのその月のデータを収集
+        all_records = []
+        try:
+            src_wb = get_or_create_monthly_spreadsheet(gc, year, month)
+        except Exception as e:
+            results.append(f"{sheet_name}: スプレッドシート取得失敗 ({e})")
+            continue
+
+        for s in staff.values():
+            name = s["name"]
+            try:
+                ws = src_wb.worksheet(name)
+                rows = ws.get_all_values()
+                for row in rows[3:]:
+                    if not row or not row[0]:
+                        continue
+                    if "合計" in str(row[0]):
+                        continue
+                    date_val = row[0]
+                    if not (date_val.startswith(month_prefix) or
+                            date_val.startswith(f"{year}/{month:02d}") or
+                            date_val.startswith(f"{year}/{month}/")):
+                        continue
+                    # [日付, 曜日, シフト開始, シフト終了, 出勤, 退勤, 合計h, 給与, 交通費, 合計]
+                    clock_in  = row[4] if len(row) > 4 else ""
+                    clock_out = row[5] if len(row) > 5 else ""
+                    hours     = row[6] if len(row) > 6 else ""
+                    pay       = row[7] if len(row) > 7 else ""
+                    if not clock_in:
+                        continue
+                    all_records.append([date_val, row[1] if len(row) > 1 else "", name, clock_in, clock_out, hours, pay])
+            except Exception:
+                continue
+
+        if not all_records:
+            results.append(f"{sheet_name}: データなし")
+            continue
+
+        # 日付順にソート
+        all_records.sort(key=lambda r: r[0])
+
+        # シートを取得または作成
+        try:
+            dst_ws = delivery_wb.worksheet(sheet_name)
+            dst_ws.clear()
+        except gspread.exceptions.WorksheetNotFound:
+            dst_ws = delivery_wb.add_worksheet(title=sheet_name, rows=500, cols=7)
+
+        header = [["日付", "曜日", "スタッフ名", "出勤", "退勤", "合計時間(h)", "給与(円)"]]
+        dst_ws.update(header + all_records, "A1", value_input_option="USER_ENTERED")
+
+        # ヘッダー書式
+        dst_ws.format("A1:G1", {
+            "textFormat": {"bold": True, "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
+            "backgroundColor": {"red": 0.2, "green": 0.2, "blue": 0.2},
+            "horizontalAlignment": "CENTER"
+        })
+
+        import time; time.sleep(1)
+        results.append(f"{sheet_name}: {len(all_records)}件を書き込み")
+
+    # デフォルトシート(シート1)があれば削除
+    try:
+        default = delivery_wb.worksheet("シート1")
+        delivery_wb.del_worksheet(default)
+    except Exception:
+        pass
+
+    link = f'<a href="https://docs.google.com/spreadsheets/d/{DELIVERY_LIST_SS_ID}" target="_blank">配達スタッフ出勤リストを開く</a>'
+    return "<br>".join(results) + f"<br><br>{link}<br><br><a href='/admin'>管理画面に戻る</a>"
 
 @app.route("/")
 def index():

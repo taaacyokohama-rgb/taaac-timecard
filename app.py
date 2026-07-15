@@ -735,6 +735,47 @@ ADMIN_HTML = """
     </form>
   </div>
 
+  <!-- 記録を修正 -->
+  <div class="section">
+    <h2>記録を修正</h2>
+    <div class="add-form" style="align-items:flex-end;">
+      <select id="editRecordStaff" style="flex:2;padding:10px 14px;border:2px solid #ddd;border-radius:8px;font-size:14px;outline:none;">
+        <option value="">スタッフを選択</option>
+        {% for sid, s in staff.items() %}
+        <option value="{{ sid }}" data-name="{{ s.name }}">{{ s.name }}</option>
+        {% endfor %}
+      </select>
+      <div style="flex:1.5;display:flex;flex-direction:column;gap:3px;">
+        <label style="font-size:11px;color:#888;">日付</label>
+        <input type="date" id="editRecordDate" style="width:100%;">
+      </div>
+      <button onclick="searchRecord()" style="background:#e67e22;">検索</button>
+    </div>
+    <div id="editRecordResult" style="display:none;margin-top:14px;background:#f9f9f9;border-radius:10px;padding:16px;">
+      <div style="font-size:13px;color:#888;margin-bottom:10px;" id="editRecordLabel"></div>
+      <div class="add-form" style="flex-wrap:wrap;align-items:flex-end;">
+        <div style="flex:1;display:flex;flex-direction:column;gap:3px;">
+          <label style="font-size:11px;color:#888;">シフト開始</label>
+          <input type="time" id="erShiftStart" style="width:100%;">
+        </div>
+        <div style="flex:1;display:flex;flex-direction:column;gap:3px;">
+          <label style="font-size:11px;color:#888;">シフト終了</label>
+          <input type="time" id="erShiftEnd" style="width:100%;">
+        </div>
+        <div style="flex:1;display:flex;flex-direction:column;gap:3px;">
+          <label style="font-size:11px;color:#888;">出勤打刻</label>
+          <input type="time" id="erClockIn" style="width:100%;">
+        </div>
+        <div style="flex:1;display:flex;flex-direction:column;gap:3px;">
+          <label style="font-size:11px;color:#888;">退勤打刻</label>
+          <input type="time" id="erClockOut" style="width:100%;">
+        </div>
+        <button onclick="saveRecord()" style="background:#27ae60;">上書き保存</button>
+      </div>
+      <div id="editRecordMsg" style="margin-top:10px;font-size:13px;"></div>
+    </div>
+  </div>
+
   <!-- 外部URL設定 -->
   <div class="section">
     <h2>外部URL設定（ngrok用）</h2>
@@ -813,6 +854,69 @@ function deleteStaff(sid, name) {
   if (confirm(name + ' さんを削除しますか？')) {
     fetch('/admin/delete_staff/' + sid, {method: 'POST'}).then(() => location.reload());
   }
+}
+
+let _editRowNum = null;
+let _editStaffId = null;
+
+function searchRecord() {
+  const sid = document.getElementById('editRecordStaff').value;
+  const date = document.getElementById('editRecordDate').value;
+  if (!sid || !date) { alert('スタッフと日付を選択してください'); return; }
+  _editStaffId = sid;
+  fetch(`/admin/get_record?staff_id=${encodeURIComponent(sid)}&date=${encodeURIComponent(date)}`)
+    .then(r => r.json())
+    .then(d => {
+      const res = document.getElementById('editRecordResult');
+      const msg = document.getElementById('editRecordMsg');
+      msg.textContent = '';
+      if (d.error) {
+        res.style.display = 'block';
+        document.getElementById('editRecordLabel').textContent = d.error;
+        document.getElementById('erShiftStart').value = '';
+        document.getElementById('erShiftEnd').value = '';
+        document.getElementById('erClockIn').value = '';
+        document.getElementById('erClockOut').value = '';
+        _editRowNum = null;
+        return;
+      }
+      _editRowNum = d.row_num;
+      const name = document.getElementById('editRecordStaff').selectedOptions[0].dataset.name;
+      document.getElementById('editRecordLabel').textContent = `${name} / ${date} の記録（行 ${d.row_num}）`;
+      document.getElementById('erShiftStart').value = d.shift_start || '';
+      document.getElementById('erShiftEnd').value = d.shift_end || '';
+      document.getElementById('erClockIn').value = d.clock_in || '';
+      document.getElementById('erClockOut').value = d.clock_out || '';
+      res.style.display = 'block';
+    })
+    .catch(() => alert('検索に失敗しました'));
+}
+
+function saveRecord() {
+  if (!_editRowNum || !_editStaffId) { alert('先に記録を検索してください'); return; }
+  const date = document.getElementById('editRecordDate').value;
+  const body = new URLSearchParams({
+    staff_id: _editStaffId,
+    date: date,
+    row_num: _editRowNum,
+    shift_start: document.getElementById('erShiftStart').value,
+    shift_end: document.getElementById('erShiftEnd').value,
+    clock_in: document.getElementById('erClockIn').value,
+    clock_out: document.getElementById('erClockOut').value,
+  });
+  fetch('/admin/edit_record', {method: 'POST', body})
+    .then(r => r.json())
+    .then(d => {
+      const msg = document.getElementById('editRecordMsg');
+      if (d.ok) {
+        msg.style.color = '#27ae60';
+        msg.textContent = '✓ 保存しました';
+      } else {
+        msg.style.color = '#e74c3c';
+        msg.textContent = 'エラー: ' + d.error;
+      }
+    })
+    .catch(() => alert('保存に失敗しました'));
 }
 </script>
 </body>
@@ -1178,6 +1282,84 @@ def manual_punch():
         session["flash_type"] = "error"
 
     return redirect(url_for("admin"))
+
+@app.route("/admin/get_record")
+def get_record():
+    if not session.get("admin"):
+        return jsonify({"error": "未ログイン"}), 401
+    from flask import jsonify, request as req
+    staff_id = req.args.get("staff_id")
+    date_str = req.args.get("date")
+    staff = load_staff()
+    if not staff_id or staff_id not in staff or not date_str:
+        return jsonify({"error": "パラメータ不正"})
+    s = staff[staff_id]
+    gc = get_sheets_client()
+    if not gc:
+        return jsonify({"error": "Sheets未認証"})
+    try:
+        try:
+            y, m, _ = [int(x) for x in date_str.split("-")]
+        except Exception:
+            return jsonify({"error": "日付フォーマット不正"})
+        wb = get_or_create_monthly_spreadsheet(gc, y, m)
+        ws = wb.worksheet(s["name"])
+        rows = ws.get_all_values()
+        for i, row in enumerate(rows[3:], start=4):
+            if row and row[0] == date_str:
+                return jsonify({
+                    "row_num": i,
+                    "shift_start": row[2] if len(row) > 2 else "",
+                    "shift_end":   row[3] if len(row) > 3 else "",
+                    "clock_in":    row[4] if len(row) > 4 else "",
+                    "clock_out":   row[5] if len(row) > 5 else "",
+                })
+        return jsonify({"error": f"{date_str} の記録が見つかりません（新規追加してください）"})
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+@app.route("/admin/edit_record", methods=["POST"])
+def edit_record():
+    if not session.get("admin"):
+        return jsonify({"error": "未ログイン"}), 401
+    from flask import jsonify, request as req
+    staff_id   = req.form.get("staff_id")
+    date_str   = req.form.get("date")
+    row_num    = req.form.get("row_num")
+    shift_start= req.form.get("shift_start", "").strip()
+    shift_end  = req.form.get("shift_end", "").strip()
+    clock_in   = req.form.get("clock_in", "").strip()
+    clock_out  = req.form.get("clock_out", "").strip()
+    staff = load_staff()
+    if not staff_id or staff_id not in staff or not date_str or not row_num or not clock_in:
+        return jsonify({"ok": False, "error": "パラメータ不正"})
+    s = staff[staff_id]
+    gc = get_sheets_client()
+    if not gc:
+        return jsonify({"ok": False, "error": "Sheets未認証"})
+    try:
+        y, m, _ = [int(x) for x in date_str.split("-")]
+        wb = get_or_create_monthly_spreadsheet(gc, y, m)
+        ws = wb.worksheet(s["name"])
+        n = int(row_num)
+        weekday = WEEKDAYS_JP[datetime.strptime(date_str, "%Y-%m-%d").weekday()]
+        hours_formula = (
+            f'=IF(F{n}="","",IF(C{n}<>"",'
+            f'MAX(0,(TIMEVALUE(F{n})-MAX(TIMEVALUE(E{n}),TIMEVALUE(C{n})))*24),'
+            f'MAX(0,(TIMEVALUE(F{n})-TIMEVALUE(E{n}))*24)))'
+        )
+        pay_formula   = f'=IF(G{n}="","",ROUND(G{n}*$B$2))'
+        transport_val = ws.cell(n, 9).value or "0"
+        total_formula = f'=IF(H{n}="","",H{n}+IF(I{n}="",0,I{n}))'
+        ws.update(
+            [[date_str, weekday, shift_start, shift_end, clock_in, clock_out,
+              hours_formula, pay_formula, transport_val, total_formula]],
+            f"A{n}",
+            value_input_option="USER_ENTERED"
+        )
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
 
 @app.route("/admin/set_base_url", methods=["POST"])
 def set_base_url():

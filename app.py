@@ -788,6 +788,38 @@ ADMIN_HTML = """
     <p style="font-size:12px;color:#aaa;margin-top:8px;">QRコードのURLに使われます。ngrokのURLを貼り付けてください。</p>
   </div>
 
+  <!-- 臨時支払い -->
+  <div class="section">
+    <h2>臨時支払いを追加</h2>
+    <form method="post" action="/admin/add_expense">
+      <div class="add-form" style="flex-wrap:wrap;">
+        <select name="staff_id" required style="flex:2;padding:10px 14px;border:2px solid #ddd;border-radius:8px;font-size:14px;outline:none;">
+          <option value="">スタッフを選択</option>
+          {% for sid, s in staff.items() %}
+          <option value="{{ sid }}">{{ s.name }}</option>
+          {% endfor %}
+        </select>
+        <div style="flex:1.5;display:flex;flex-direction:column;gap:3px;">
+          <label style="font-size:11px;color:#888;">日付</label>
+          <input type="date" name="date" required style="width:100%;">
+        </div>
+        <div style="flex:2;display:flex;flex-direction:column;gap:3px;">
+          <label style="font-size:11px;color:#888;">種別（例: 駐車場代）</label>
+          <input type="text" name="expense_type" placeholder="駐車場代・材料費など" required style="width:100%;">
+        </div>
+        <div style="flex:1;display:flex;flex-direction:column;gap:3px;">
+          <label style="font-size:11px;color:#888;">金額（円）</label>
+          <input type="number" name="amount" placeholder="0" min="0" required style="width:100%;">
+        </div>
+        <div style="flex:2;display:flex;flex-direction:column;gap:3px;">
+          <label style="font-size:11px;color:#888;">備考</label>
+          <input type="text" name="note" placeholder="任意" style="width:100%;">
+        </div>
+        <button type="submit" style="background:#c0392b;">追加</button>
+      </div>
+    </form>
+  </div>
+
   <!-- スタッフ追加 -->
   <div class="section">
     <h2>スタッフ追加</h2>
@@ -1360,6 +1392,53 @@ def edit_record():
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
+
+EXPENSE_SHEET_NAME = "臨時支払い"
+
+@app.route("/admin/add_expense", methods=["POST"])
+def add_expense():
+    if not session.get("admin"):
+        return redirect(url_for("admin_login"))
+    staff_id     = request.form.get("staff_id")
+    date_str     = request.form.get("date")
+    expense_type = request.form.get("expense_type", "").strip()
+    amount       = request.form.get("amount", "0").strip()
+    note         = request.form.get("note", "").strip()
+    staff = load_staff()
+    if not staff_id or staff_id not in staff or not date_str or not expense_type or not amount:
+        session["flash_msg"] = "入力内容を確認してください"
+        session["flash_type"] = "error"
+        return redirect(url_for("admin"))
+    s = staff[staff_id]
+    gc = get_sheets_client()
+    if not gc:
+        session["flash_msg"] = "Google Sheets未認証"
+        session["flash_type"] = "error"
+        return redirect(url_for("admin"))
+    try:
+        y, m, _ = [int(x) for x in date_str.split("-")]
+        wb = get_or_create_monthly_spreadsheet(gc, y, m)
+        # 臨時支払いシートを取得または作成
+        try:
+            ws = wb.worksheet(EXPENSE_SHEET_NAME)
+        except gspread.exceptions.WorksheetNotFound:
+            ws = wb.add_worksheet(title=EXPENSE_SHEET_NAME, rows=200, cols=6)
+            header = [["日付", "スタッフ名", "種別", "金額（円）", "備考"]]
+            ws.update(header, "A1", value_input_option="USER_ENTERED")
+            ws.format("A1:E1", {
+                "textFormat": {"bold": True, "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
+                "backgroundColor": {"red": 0.6, "green": 0.1, "blue": 0.1},
+                "horizontalAlignment": "CENTER"
+            })
+        weekday = WEEKDAYS_JP[datetime.strptime(date_str, "%Y-%m-%d").weekday()]
+        ws.append_row([date_str, s["name"], expense_type, int(amount), note],
+                      value_input_option="USER_ENTERED")
+        session["flash_msg"] = f"{s['name']} {date_str} {expense_type} ¥{int(amount):,} を記録しました"
+        session["flash_type"] = "success"
+    except Exception as e:
+        session["flash_msg"] = f"記録に失敗しました: {e}"
+        session["flash_type"] = "error"
+    return redirect(url_for("admin"))
 
 @app.route("/admin/set_base_url", methods=["POST"])
 def set_base_url():

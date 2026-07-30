@@ -1466,11 +1466,14 @@ def qr_image(staff_id):
     from flask import send_file
     return send_file(buf, mimetype="image/png")
 
+_summary_cache = {}  # (year, month) -> {"data": rows_by_staff, "ts": timestamp}
+
 @app.route("/summary")
 @app.route("/summary/<int:year>/<int:month>")
 def summary(year=None, month=None):
     if not session.get("admin"):
         return redirect(url_for("admin_login"))
+    import time as _time
     now = datetime.now(JST)
     year = year or now.year
     month = month or now.month
@@ -1478,9 +1481,16 @@ def summary(year=None, month=None):
     staff = load_staff()
     gc = get_sheets_client()
 
+    # 5分キャッシュ（今月は1分）
+    cache_ttl = 60 if (year == now.year and month == now.month) else 300
+    cache_key = (year, month)
+    cached = _summary_cache.get(cache_key)
     rows_by_staff = {}
     error_msg = None
-    if gc:
+
+    if cached and _time.time() - cached["ts"] < cache_ttl:
+        rows_by_staff = cached["data"]
+    elif gc:
         try:
             wb = get_or_create_monthly_spreadsheet(gc, year, month)
             for s in staff.values():
@@ -1502,6 +1512,8 @@ def summary(year=None, month=None):
                     rows_by_staff[name] = []
         except Exception as e:
             error_msg = str(e)
+        if not error_msg:
+            _summary_cache[cache_key] = {"data": rows_by_staff, "ts": _time.time()}
 
     # 集計
     summary_data = []

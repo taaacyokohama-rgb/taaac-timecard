@@ -146,6 +146,7 @@ _monthly_ss_cache = {}
 _PRECREATED_SS = {
     (2026, 6): "1hWuPrBnueFL1xiAzLTq5ex8FUEq5msA0fPZkBy5owkI",
     (2026, 7): "1SubXg-EQ9wRREhc97-MAqJ7G8efKNdJT83AzmnBUE28",
+    (2026, 8): "1PvMH_M1ZDoaT9MdjnYPaWbH-D4Qqa0roikvVLkvHmkQ",
 }
 
 def get_monthly_spreadsheet_title(year, month):

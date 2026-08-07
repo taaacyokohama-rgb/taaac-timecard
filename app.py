@@ -1418,23 +1418,15 @@ def add_expense():
         return redirect(url_for("admin"))
     try:
         y, m, _ = [int(x) for x in date_str.split("-")]
-        wb = get_or_create_monthly_spreadsheet(gc, y, m)
-        # 臨時支払いシートを取得または作成
-        try:
-            ws = wb.worksheet(EXPENSE_SHEET_NAME)
-        except gspread.exceptions.WorksheetNotFound:
-            ws = wb.add_worksheet(title=EXPENSE_SHEET_NAME, rows=200, cols=6)
-            header = [["日付", "スタッフ名", "種別", "金額（円）", "備考"]]
-            ws.update(header, "A1", value_input_option="USER_ENTERED")
-            ws.format("A1:E1", {
-                "textFormat": {"bold": True, "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
-                "backgroundColor": {"red": 0.6, "green": 0.1, "blue": 0.1},
-                "horizontalAlignment": "CENTER"
-            })
+        ws, wb = get_or_create_staff_sheet(gc, s["name"], s["wage"], y, m)
         weekday = WEEKDAYS_JP[datetime.strptime(date_str, "%Y-%m-%d").weekday()]
-        ws.append_row([date_str, s["name"], expense_type, int(amount), note],
+        label = expense_type + (f"（{note}）" if note else "")
+        # 個人シートに1行追加: 日付・曜日・種別を備考として・交通費列に金額
+        row_num = len(ws.col_values(1)) + 1
+        total_formula = f'=IF(I{row_num}="","",I{row_num})'
+        ws.append_row([date_str, weekday, label, "", "", "", "", "", int(amount), total_formula],
                       value_input_option="USER_ENTERED")
-        session["flash_msg"] = f"{s['name']} {date_str} {expense_type} ¥{int(amount):,} を記録しました"
+        session["flash_msg"] = f"{s['name']} {date_str} {label} ¥{int(amount):,} を記録しました"
         session["flash_type"] = "success"
     except Exception as e:
         session["flash_msg"] = f"記録に失敗しました: {e}"

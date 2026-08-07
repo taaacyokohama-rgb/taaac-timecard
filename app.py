@@ -1421,11 +1421,16 @@ def add_expense():
         ws, wb = get_or_create_staff_sheet(gc, s["name"], s["wage"], y, m)
         weekday = WEEKDAYS_JP[datetime.strptime(date_str, "%Y-%m-%d").weekday()]
         label = expense_type + (f"（{note}）" if note else "")
-        # 合計行の直前に挿入、なければ末尾に追加
+        # 合計行を探して直前に挿入、なければ末尾に追加
         all_dates = ws.col_values(1)
-        if all_dates and "月 合計" in all_dates[-1]:
-            row_num = len(all_dates)  # 合計行のインデックス（1始まり）
-            ws.insert_row(["", "", "", "", "", "", "", "", "", ""], row_num)
+        summary_row_idx = None
+        for i, v in enumerate(all_dates):
+            if "月 合計" in v:
+                summary_row_idx = i + 1  # 1始まり
+                break
+        if summary_row_idx:
+            ws.insert_row([""] * 10, summary_row_idx)
+            row_num = summary_row_idx
         else:
             row_num = len(all_dates) + 1
         total_formula = f'=IF(I{row_num}="","",I{row_num})'

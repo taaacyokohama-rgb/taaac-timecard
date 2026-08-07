@@ -1421,11 +1421,16 @@ def add_expense():
         ws, wb = get_or_create_staff_sheet(gc, s["name"], s["wage"], y, m)
         weekday = WEEKDAYS_JP[datetime.strptime(date_str, "%Y-%m-%d").weekday()]
         label = expense_type + (f"（{note}）" if note else "")
-        # 個人シートに1行追加: 日付・曜日・種別を備考として・交通費列に金額
-        row_num = len(ws.col_values(1)) + 1
+        # 合計行の直前に挿入、なければ末尾に追加
+        all_dates = ws.col_values(1)
+        if all_dates and "月 合計" in all_dates[-1]:
+            row_num = len(all_dates)  # 合計行のインデックス（1始まり）
+            ws.insert_row(["", "", "", "", "", "", "", "", "", ""], row_num)
+        else:
+            row_num = len(all_dates) + 1
         total_formula = f'=IF(I{row_num}="","",I{row_num})'
-        ws.append_row([date_str, weekday, label, "", "", "", "", "", int(amount), total_formula],
-                      value_input_option="USER_ENTERED")
+        ws.update([[date_str, weekday, label, "", "", "", "", "", int(amount), total_formula]],
+                  f"A{row_num}", value_input_option="USER_ENTERED")
         session["flash_msg"] = f"{s['name']} {date_str} {label} ¥{int(amount):,} を記録しました"
         session["flash_type"] = "success"
     except Exception as e:

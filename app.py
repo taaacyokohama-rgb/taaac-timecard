@@ -1431,10 +1431,22 @@ def add_expense():
         if summary_row_idx:
             ws.insert_row([""] * 10, summary_row_idx)
             row_num = summary_row_idx
+            new_summary_row = summary_row_idx + 1
+            # 合計行のSUM式を1行分拡張（挿入した行を含める）
+            summary_vals = ws.row_values(new_summary_row)
+            def extend_sum(formula):
+                import re
+                def bump(m):
+                    return m.group(1) + str(int(m.group(2)) + 1) + m.group(3)
+                return re.sub(r'(:[A-Z])(\d+)(\))', bump, formula) if formula.startswith("=SUM") else formula
+            new_g = extend_sum(summary_vals[6] if len(summary_vals) > 6 else "")
+            new_h = extend_sum(summary_vals[7] if len(summary_vals) > 7 else "")
+            new_i = extend_sum(summary_vals[8] if len(summary_vals) > 8 else "")
+            new_j = extend_sum(summary_vals[9] if len(summary_vals) > 9 else "")
+            ws.update([[new_g, new_h, new_i, new_j]], f"G{new_summary_row}", value_input_option="USER_ENTERED")
         else:
             row_num = len(all_dates) + 1
-        total_formula = f'=IF(I{row_num}="","",I{row_num})'
-        ws.update([[date_str, weekday, label, "", "", "", "", "", int(amount), total_formula]],
+        ws.update([[date_str, weekday, label, "", "", "", "", "", int(amount), int(amount)]],
                   f"A{row_num}", value_input_option="USER_ENTERED")
         session["flash_msg"] = f"{s['name']} {date_str} {label} ¥{int(amount):,} を記録しました"
         session["flash_type"] = "success"

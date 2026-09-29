@@ -148,6 +148,9 @@ _PRECREATED_SS = {
     (2026, 7): "1SubXg-EQ9wRREhc97-MAqJ7G8efKNdJT83AzmnBUE28",
     (2026, 8): "1PvMH_M1ZDoaT9MdjnYPaWbH-D4Qqa0roikvVLkvHmkQ",
     (2026, 9): "1rgZOYYzILRwB2BTvnub0ZDA7Z-AkKiRyBM6YJStk8t4",
+    (2026, 10): "1mGYW6E3FlO66AVEz5EsxZ8Y1CMhqL_jHFixg3zfwUR8",
+    (2026, 11): "1x2s6lLJ6WEVkM9FtP6Enm6ntgPF3XMBpj0I1uiSrXJM",
+    (2026, 12): "1r5H0UPpEBg79b1IoKal9-1TsLd-V4FyGaPU6X9aGp4A",
 }
 
 def get_monthly_spreadsheet_title(year, month):
